@@ -224,3 +224,56 @@ def get_all_pairings(name_list):
     """
     pairings = [(name_list[i], name_list[j]) for i in range(len(name_list)) for j in range(i + 1, len(name_list))]
     return pairings
+
+def solve_vrp_for_all_pairs_in_dataframe(pairs_df, distance_matrix, cost_per_truck, cost_per_km, timelimit, approx, nmbr_loc):
+    """
+    Solve VRPs for all pairs of companies listed in a DataFrame.
+    
+    Parameters:
+        pairs_df (pd.DataFrame): DataFrame with columns ["Company1", "Company2", "Overlap Percentage"].
+        distance_matrix (pd.DataFrame): The original distance matrix with all locations.
+        cost_per_truck (float): Fixed cost per truck.
+        cost_per_km (float): Cost per kilometer.
+        timelimit (int): Time limit for solving the VRP (in seconds).
+        approx (bool): Whether to use an approximate solver.
+        nmbr_loc (int): Maximum capacity of each truck.
+    
+    Returns:
+        pd.DataFrame: DataFrame with VRP results for each pair.
+    """
+    results = []
+
+    for _, row in pairs_df.iterrows():
+        company1 = row["Company1"]
+        company2 = row["Company2"]
+        overlap_percentage = row["Overlap Percentage"]
+
+        # Filter the distance matrix for the two companies and the depot
+        relevant_nodes = [
+            node for node in distance_matrix.index
+            if node.startswith(company1) or node.startswith(company2) or node == "Universal_Depot"
+        ]
+        filtered_matrix = distance_matrix.loc[relevant_nodes, relevant_nodes]
+
+        # Solve the VRP for the filtered matrix
+        vrp_result = solve_cvrp_numeric_ids(
+            cost_per_truck=cost_per_truck,
+            cost_per_km=cost_per_km,
+            timelimit=timelimit,
+            approx=approx,
+            nmbr_loc=nmbr_loc,
+            distance_matrix=filtered_matrix,
+            depot_name="Universal_Depot"
+        )
+
+        # Add the result to the list
+        results.append({
+            "Company1": company1,
+            "Company2": company2,
+            "Overlap Percentage": overlap_percentage,
+            "Routes": vrp_result.get("Routes", None),
+            "Total Distance": vrp_result.get("Total Distance", None)
+        })
+
+    # Convert the results into a DataFrame
+    return pd.DataFrame(results)

@@ -8,8 +8,14 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 from ranking import rank_company_pairs_by_overlap
-from solver import create_batched_distance_matrix, solo_routes
+from solver import create_batched_distance_matrix, solo_routes, solve_vrp_for_all_pairs_in_dataframe
 from plot_routes import generate_route_map_fixed_with_legend
+from bounding_box import (
+    rank_company_pairs_by_overlap_percentage,
+    visualize_bounding_boxes,
+    get_best_partnerships,
+)
+
 
 # If you need to add variables, do it here for clarity
 map_center = [52.37, 4.95]
@@ -82,6 +88,16 @@ if uploaded_file is not None:
             if not required_columns.issubset(df.columns):
                 st.error(f"The uploaded file must contain the following columns: {', '.join(required_columns)}")
                 st.stop()
+            # Step 2: Rank Companies by Overlap Percentage
+            #st.subheader("Ranked Company Pairs by Overlap Percentage")
+            ranked_pairs = rank_company_pairs_by_overlap_percentage(df)
+            #st.dataframe(ranked_pairs)
+            st.session_state["ranked_pairs"] = ranked_pairs
+            #st.dataframe(ranked_pairs)
+
+            best_partnerships = get_best_partnerships(ranked_pairs)
+            #st.write("Best Partnerships Without Repetition:")
+            #st.write(best_partnerships)
 
             st.session_state["uploaded_data"] = df
             st.session_state["vrp_generated"] = False  # Reset VRP when a new file is uploaded
@@ -92,14 +108,14 @@ if uploaded_file is not None:
     df = st.session_state["uploaded_data"]
     #st.write("Uploaded Data:")
     #st.dataframe(df)
+    if "ranked_pairs" in st.session_state:
+        # Calculate best partnerships only once and display it
+        best_partnerships = get_best_partnerships(st.session_state["ranked_pairs"])
+        st.subheader("Best Partnerships Without Repetition:")
+        st.dataframe(best_partnerships)
+        st.session_state["best_partnerships"] = best_partnerships
 
-    # Rank company pairs
-    try:
-        ranked_pairs = rank_company_pairs_by_overlap(df)
-        st.subheader("Ranking of Company Pairs")
-        st.dataframe(ranked_pairs)
-    except Exception as e:
-        st.error(f"Error ranking company pairs: {e}")
+
 
     # Sidebar inputs for VRP solver
     st.sidebar.header("Parameters Solver")
@@ -110,8 +126,10 @@ if uploaded_file is not None:
     time_per_VRP = st.sidebar.number_input("Maximum time spent per VRP", min_value=0, value=10)
 
     # Button to calculate VRP
+    # Button to calculate VRP
     if st.sidebar.button("Calculate VRP Solution"):
         try:
+            # Prepare locations
             locations = [
                 {"lon": row["lon"], "lat": row["lat"], "name": row["name"], "unique_name": f"{row['name']}_{i}"}
                 for i, row in df.iterrows()
@@ -125,17 +143,28 @@ if uploaded_file is not None:
             # Create distance matrix
             distance_matrix = create_batched_distance_matrix(locations)
             st.session_state["distance_matrix"] = distance_matrix  # Save matrix to session state
-            st.write("Distance Matrix:")
-            st.dataframe(distance_matrix)
 
-            # Solve CVRP
+            # Solve solo VRP
             result = solo_routes(cost_per_truck, cost_per_km, time_per_VRP, exact_solution, nmbr_loc, distance_matrix)
             if isinstance(result, pd.DataFrame) and not result.empty:
                 st.session_state["vrp_result"] = result
                 st.session_state["vrp_generated"] = True
-                st.success("VRP solution calculated.")
+                st.success("Solo VRP solution calculated.")
             else:
-                st.error("No VRP solution found.")
+                st.error("No solo VRP solution found.")
+
+            # Solve VRP for company pairs
+            ranked_pairs = st.session_state["ranked_pairs"]
+            pair_result = solve_vrp_for_all_pairs_in_dataframe(
+                best_partnerships, distance_matrix, cost_per_truck, cost_per_km, time_per_VRP, exact_solution, nmbr_loc
+            )
+            if isinstance(pair_result, pd.DataFrame) and not pair_result.empty:
+                st.session_state["pair_result"] = pair_result
+                st.session_state["pair_generated"] = True
+                st.success("Pair VRP solution calculated.")
+            else:
+                st.error("No pair VRP solution found.")
+
         except Exception as e:
             st.error(f"Error processing VRP: {e}")
 
@@ -143,13 +172,8 @@ if uploaded_file is not None:
     if st.session_state.get("vrp_generated", False):
         vrp_result = st.session_state["vrp_result"]
 
-        # # Display distance matrix
-        # if "distance_matrix" in st.session_state:
-        #     st.write("Distance Matrix:")
-        #     st.dataframe(st.session_state["distance_matrix"])
-
-        # Display textual results
-        st.write("VRP Solution:")
+        # Display solo VRP results
+        st.write("Solo VRP Solution:")
         for idx, row in vrp_result.iterrows():
             company_name = row.get("Company", f"Company {idx + 1}")
             st.subheader(f"Route for {company_name}")
@@ -158,7 +182,29 @@ if uploaded_file is not None:
             routes = row.get("Routes", {})
             if isinstance(routes, str):
                 import ast
+                routes = ast.literal_eval(routes)
+            for vehicle_id, route in routes.items():
+                st.write(f"Vehicle {vehicle_id}: {' -> '.join(map(str, route))}")
 
+            # Display total distance
+            total_distance = row.get("Total Distance", None)
+            if total_distance is not None:
+                st.write(f"Total Cost: {total_distance:.1f} €")
+
+    if st.session_state.get("pair_generated", False):
+        pair_result = st.session_state["pair_result"]
+
+        # Display pair VRP results
+        st.write("Pair VRP Solution:")
+        for idx, row in pair_result.iterrows():
+            company1 = row.get("Company1")
+            company2 = row.get("Company2")
+            st.subheader(f"Route for Pair: {company1} & {company2}")
+
+            # Display routes
+            routes = row.get("Routes", {})
+            if isinstance(routes, str):
+                import ast
                 routes = ast.literal_eval(routes)
             for vehicle_id, route in routes.items():
                 st.write(f"Vehicle {vehicle_id}: {' -> '.join(map(str, route))}")
@@ -169,41 +215,104 @@ if uploaded_file is not None:
                 st.write(f"Total Cost: {total_distance:.1f} €")
 
 
-        # Generate the map automatically after VRP calculation
-        import streamlit.components.v1 as components  # Required to render HTML iframe
+    # Add comparison table for solo and paired routes
+    # Add comparison table for solo and paired routes
+    if st.session_state.get("vrp_generated", False) and st.session_state.get("pair_generated", False):
+        # Extract solo route costs
+        solo_costs = st.session_state["vrp_result"].copy()
+        solo_costs = solo_costs[["Company", "Total Distance"]]
+        solo_costs.rename(columns={"Total Distance": "Solo Route Cost (€)"}, inplace=True)
 
-        # Generate the map automatically after VRP calculation
-        if "route_map" not in st.session_state:
-            try:
-                depot_location = st.session_state["depot_location"]
-                route_map, map_file = generate_route_map_fixed_with_legend(depot_location, df, vrp_result)
-                st.session_state["route_map"] = route_map
-                st.session_state["map_file"] = map_file
-            except Exception as e:
-                st.error(f"Error generating the map: {e}")
+        # Extract pair route costs
+        pair_costs = st.session_state["pair_result"].copy()
+        pair_costs = pair_costs[["Company1", "Company2", "Total Distance"]]
+        pair_costs.rename(columns={"Total Distance": "Paired Route Cost (€)"}, inplace=True)
 
-        # Provide a subheader
-        st.subheader("Generated Routes Map (Interactive)")
+        # Merge solo costs with both Company1 and Company2 in pair costs
+        pair_costs_merged = pd.merge(
+            pair_costs,
+            solo_costs,
+            left_on="Company1",
+            right_on="Company",
+            how="left"
+        ).rename(columns={"Solo Route Cost (€)": "Solo Cost (Company1)"})
 
-        # Render the map using an HTML iframe
-        if "map_file" in st.session_state:
-            try:
-                # Display the map using an iframe
-                with open(st.session_state["map_file"], "r", encoding="utf-8") as map_file:
-                    map_html = map_file.read()
-                components.html(map_html, height=700, width=1100)
-            except Exception as e:
-                st.warning("The interactive map could not be rendered inline. Please download the map instead.")
+        pair_costs_merged = pd.merge(
+            pair_costs_merged,
+            solo_costs,
+            left_on="Company2",
+            right_on="Company",
+            how="left"
+        ).rename(columns={"Solo Route Cost (€)": "Solo Cost (Company2)"})
 
-        # Provide a download button for the map file
-        if "map_file" in st.session_state:
-            with open(st.session_state["map_file"], "rb") as file:
-                st.download_button(
-                    label="Download Map as HTML",
-                    data=file,
-                    file_name="routes_map.html",
-                    mime="text/html",
-                )
+        # Drop duplicate columns
+        pair_costs_merged = pair_costs_merged.drop(columns=["Company_x", "Company_y"])
+
+        # Calculate potential savings for paired routes
+        pair_costs_merged["Total Solo Cost (€)"] = (
+            pair_costs_merged["Solo Cost (Company1)"] + pair_costs_merged["Solo Cost (Company2)"]
+        )
+        pair_costs_merged["Savings (€)"] = (
+            pair_costs_merged["Total Solo Cost (€)"] - pair_costs_merged["Paired Route Cost (€)"]
+        )
+
+        # Finalize and rearrange the columns
+        comparison_table = pair_costs_merged[
+            [
+                "Company1",
+                "Company2",
+                "Solo Cost (Company1)",
+                "Solo Cost (Company2)",
+                "Paired Route Cost (€)",
+                "Total Solo Cost (€)",
+                "Savings (€)"
+            ]
+        ]
+
+        # Display the table
+        st.subheader("Comparison of Solo and Paired Route Costs")
+        st.table(comparison_table)
+
+
+
+
+
+    import streamlit.components.v1 as components  # Required to render HTML iframe
+
+    # Generate the map automatically after VRP calculation
+    if "route_map" not in st.session_state:
+        try:
+            depot_location = st.session_state["depot_location"]
+            route_map, map_file = generate_route_map_fixed_with_legend(depot_location, df, vrp_result)
+            st.session_state["route_map"] = route_map
+            st.session_state["map_file"] = map_file
+        except Exception as e:
+            st.error(f"Error generating the map: {e}")
+
+    # Provide a subheader
+    st.subheader("Generated Routes Map (Interactive)")
+
+    # Render the map using an HTML iframe
+    if "map_file" in st.session_state:
+        try:
+            # Display the map using an iframe
+            with open(st.session_state["map_file"], "r", encoding="utf-8") as map_file:
+                map_html = map_file.read()
+            components.html(map_html, height=700, width=1100)
+        except Exception as e:
+            st.warning("The interactive map could not be rendered inline. Please download the map instead.")
+
+    # Provide a download button for the map file
+    if "map_file" in st.session_state:
+        with open(st.session_state["map_file"], "rb") as file:
+            st.download_button(
+                label="Download Map as HTML",
+                data=file,
+                file_name="routes_map.html",
+                mime="text/html",
+            )
+
+
 
 
 
