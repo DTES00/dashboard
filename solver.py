@@ -9,28 +9,28 @@ from concurrent.futures import ThreadPoolExecutor
 #UNIVERSAL_DEPOT = (52.0, 5.0)
 
 
-def process_data(data):
-    """
-    Process input data to generate a list of locations with lat/lon and unique names.
-    """
-    locations = []
-    for i, row in data.iterrows():
-        loc = {
-            'lon': row['lon'],
-            'lat': row['lat'],
-            'name': row['name'],
-            'unique_name': f"{row['name']}_{i}"
-        }
-        locations.append(loc)
+# def process_data(data):
+#     """
+#     Process input data to generate a list of locations with lat/lon and unique names.
+#     """
+#     locations = []
+#     for i, row in data.iterrows():
+#         loc = {
+#             'lon': row['lon'],
+#             'lat': row['lat'],
+#             'name': row['name'],
+#             'unique_name': f"{row['name']}_{i}"
+#         }
+#         locations.append(loc)
 
-    # Add the Universal Depot
-    locations.append({
-        'lon': UNIVERSAL_DEPOT[1],
-        'lat': UNIVERSAL_DEPOT[0],
-        'name': 'Universal Depot',
-        'unique_name': 'Universal_Depot'
-    })
-    return locations
+#     # Add the Universal Depot
+#     locations.append({
+#         'lon': UNIVERSAL_DEPOT[1],
+#         'lat': UNIVERSAL_DEPOT[0],
+#         'name': 'Universal Depot',
+#         'unique_name': 'Universal_Depot'
+#     })
+#     return locations
 
 
 def get_osrm_distance_submatrix(src_batch, dst_batch, base_url="http://localhost:5000", profile="driving"):
