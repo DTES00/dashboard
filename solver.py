@@ -246,7 +246,7 @@ def solve_vrp_for_all_pairs_in_dataframe(pairs_df, distance_matrix, cost_per_tru
     for _, row in pairs_df.iterrows():
         company1 = row["Company1"]
         company2 = row["Company2"]
-        overlap_percentage = row["Overlap Percentage"]
+        #overlap_percentage = row["Overlap Percentage"]
 
         # Filter the distance matrix for the two companies and the depot
         relevant_nodes = [
@@ -270,7 +270,7 @@ def solve_vrp_for_all_pairs_in_dataframe(pairs_df, distance_matrix, cost_per_tru
         results.append({
             "Company1": company1,
             "Company2": company2,
-            "Overlap Percentage": overlap_percentage,
+            #"Overlap Percentage": overlap_percentage,
             "Routes": vrp_result.get("Routes", None),
             "Total Distance": vrp_result.get("Total Distance", None)
         })
