@@ -329,3 +329,47 @@ def solve_vrp_for_all_possible_pairs(distance_matrix,
     matching_pairs_df = pd.DataFrame(chosen_pairs, columns=["Company1", "Company2", "Total Distance"])
 
     return matching_pairs_df, total_cost
+
+
+def get_filtered_matrix_for_pair(distance_matrix, company1, company2):
+    """
+    Filters the distance matrix for the given companies and the universal depot.
+    It considers all rows and columns that start with the company names.
+    """
+    # Normalize and clean the index
+    distance_matrix.index = distance_matrix.index.str.strip().str.replace('"', '').str.replace("'", '')
+    distance_matrix.columns = distance_matrix.columns.str.strip().str.replace('"', '').str.replace("'", '')
+
+    # Create a list of relevant entries
+    selected_companies = [
+        idx for idx in distance_matrix.index
+        if idx.startswith(company1) or idx.startswith(company2) or idx == "Universal_Depot"
+    ]
+
+
+
+    # Filter the matrix
+    filtered_matrix = distance_matrix.loc[selected_companies, selected_companies]
+    return filtered_matrix
+
+def get_individual_company_matrices(company1, company2, distance_matrix):
+    """
+    Returns separate distance matrices for each individual company and the Universal Depot.
+    """
+
+    # Clean up the index to remove unwanted characters
+    distance_matrix.index = distance_matrix.index.str.strip().str.replace('"', '').str.replace("'", '')
+    distance_matrix.columns = distance_matrix.columns.str.strip().str.replace('"', '').str.replace("'", '')
+
+    # Function to filter the matrix for a single company
+    def filter_for_company(company_name):
+        relevant_nodes = [
+            node for node in distance_matrix.index if node.startswith(company_name) or node == "Universal_Depot"
+        ]
+        return distance_matrix.loc[relevant_nodes, relevant_nodes]
+
+    # Create individual matrices
+    company1_matrix = filter_for_company(company1)
+    company2_matrix = filter_for_company(company2)
+
+    return company1_matrix, company2_matrix

@@ -3,9 +3,18 @@ import folium
 import pandas as pd
 from matplotlib import colormaps
 import random
-import numpy as np
-from sklearn.metrics import pairwise_distances
-import matplotlib.pyplot as plt
+
+def calculate_eps_k_distance_from_matrix(distance_matrix, k=3):
+    # Sort distances for each point (row), excluding the diagonal (self-distance)
+    sorted_distances = np.sort(distance_matrix, axis=1)
+    
+    # Extract the distances to the k-th nearest neighbor
+    k_distances = sorted_distances[:, k]
+    
+    filtered_k_distances = k_distances[k_distances > 1000]
+    eps = np.median(filtered_k_distances)
+
+    return int(eps)
 
 def get_best_partnerships(ranked_pairs):
     used_companies = set()
@@ -25,17 +34,13 @@ def get_best_partnerships(ranked_pairs):
 
 
 
-def calculate_eps_k_distance_from_matrix(distance_matrix, k=3):
-    # Sort distances for each point (row), excluding the diagonal (self-distance)
-    sorted_distances = np.sort(distance_matrix, axis=1)
-    
-    # Extract the distances to the k-th nearest neighbor
-    k_distances = sorted_distances[:, k]
-    
-    filtered_k_distances = k_distances[k_distances > 1000]
-    eps = np.median(filtered_k_distances)
-
-    return int(eps)
+eps_values = {
+    'mini': 50000,
+    'medium': 20000,
+    'many': 10000,
+    'manyLarge': 5000,
+    'Amsterdam': 1000
+}
 
 
 def get_clusters_for_file(distance_matrix):
@@ -43,8 +48,7 @@ def get_clusters_for_file(distance_matrix):
 
 
     # Perform DBSCAN clustering
-    eps=calculate_eps_k_distance_from_matrix(distance_matrix)
-    dbscan = DBSCAN(eps=eps, min_samples=2, metric='precomputed')
+    dbscan = DBSCAN(eps=calculate_eps_k_distance_from_matrix(distance_matrix), min_samples=2, metric='precomputed')
     labels = dbscan.fit_predict(distance_matrix)
 
     return labels
