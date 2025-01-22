@@ -219,7 +219,6 @@ else:
 # Check if data and matrix are available
 if df is not None and st.session_state.get("distance_matrix_generated", False):
     if "ranked_pairs" in st.session_state:
-        # Cluster_data is bad naming, should be bounding-box, but i have a brick for a brain
         cluster_data = st.session_state["ranked_pairs"]
         selected_pair = st.selectbox("Select a pair", options=list(cluster_data.index))
 
