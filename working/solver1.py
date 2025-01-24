@@ -13,7 +13,9 @@ from itertools import combinations
 # Create the distance matrix with OSRM in batches
 ################################################################################
 
-def get_osrm_distance_submatrix(src_batch, dst_batch, base_url="http://router.project-osrm.org", profile="driving"):
+def get_osrm_distance_submatrix(src_batch, dst_batch,
+                                base_url="http://router.project-osrm.org",
+                                profile="driving"):
     """
     Send a table request to OSRM to get distances between src_batch and dst_batch.
     Returns a 2D list of distances or None if there's an error.
@@ -41,9 +43,13 @@ def get_osrm_distance_submatrix(src_batch, dst_batch, base_url="http://router.pr
         return None, src_batch, dst_batch
 
 
-def create_batched_distance_matrix(locations, batch_size=10, max_workers=4):
+def create_batched_distance_matrix(locations, batch_size=10, max_workers=4,
+                                   base_url="http://router.project-osrm.org",
+                                   profile="driving"):
     """
-    Create a complete non-symmetric distance matrix by batching location pairs and parallelizing requests.
+    Create a complete non-symmetric distance matrix by batching location pairs
+    and parallelizing OSRM table requests. 'profile' can be "driving", "cycling",
+    etc., depending on your OSRM setup.
     """
     num_locations = len(locations)
     all_unique_names = [loc['unique_name'] for loc in locations]
@@ -61,10 +67,10 @@ def create_batched_distance_matrix(locations, batch_size=10, max_workers=4):
         src_batch = locations[i : i + batch_size]
         for j in range(0, num_locations, batch_size):
             dst_batch = locations[j : j + batch_size]
-            args_list.append((src_batch, dst_batch, "http://router.project-osrm.org", "driving"))
+            # Pass the base_url and profile here
+            args_list.append((src_batch, dst_batch, base_url, profile))
 
     # Use ThreadPoolExecutor for parallel requests
-    # (Note: If your local OSRM is at http://localhost:5000, set base_url = "http://localhost:5000" above)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = executor.map(lambda args: get_osrm_distance_submatrix(*args), args_list)
 
@@ -87,9 +93,11 @@ def create_batched_distance_matrix(locations, batch_size=10, max_workers=4):
 # Basic VRP solver function for a single distance matrix
 ################################################################################
 
-def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx, nmbr_loc, distance_matrix, depot_name="Universal_Depot"):
+def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx,
+                           nmbr_loc, distance_matrix, depot_name="Universal_Depot"):
     """
     Solve a Capacitated Vehicle Routing Problem using a distance matrix.
+    cspy=True and pricing_strategy="Exact" => VRPy runs an exact method with column-generation.
     """
     G = DiGraph()
     G.add_node("Source", demand=0)
@@ -123,10 +131,15 @@ def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx, nmbr_
     vrp.source = "Source"
     vrp.sink = "Sink"
     vrp.load_capacity = nmbr_loc
-    vrp.exact = approx
+    vrp.exact = approx  # This toggles internal VRPy logic, but we also set cspy below
 
     try:
-        vrp.solve(time_limit=timelimit)
+        vrp.solve(
+            cspy=True,
+            pricing_strategy="Exact",
+            time_limit=timelimit,
+            solver="cbc"  # or "gurobi", "glpk", etc.
+        )
     except Exception as e:
         print("Error solving VRP:", e)
         return {"Routes": None, "Total Distance": float("inf")}
@@ -209,8 +222,6 @@ def solve_vrp_for_all_pairs_in_dataframe(pairs_df, distance_matrix,
     """
     Solve VRP for only the pairs listed in pairs_df, returning a DataFrame
     with columns [Company1, Company2, Routes, Total Distance].
-    
-    Typically used for bounding-box or cluster-based pairs (not all possible).
     """
     results = []
 
@@ -259,12 +270,12 @@ def solve_vrp_for_all_possible_pairs(distance_matrix,
                                      nmbr_loc):
     """
     Enumerate VRP for every possible pair of companies, then do a
-    minimum-weight perfect matching to cover all companies in pairs
+    min-weight perfect matching to cover all companies in pairs
     (assuming an even number of companies, no solos).
     
     Returns:
-        matching_pairs_df (pd.DataFrame): columns = ["Company1","Company2","Total Distance"]
-        total_cost (float): sum of the VRP costs in the matching.
+        matching_pairs_df (pd.DataFrame): columns=["Company1","Company2","Total Distance"]
+        total_cost (float): sum of VRP costs in the matching.
     """
     # 1) Unique companies
     unique_companies = sorted({
@@ -276,7 +287,7 @@ def solve_vrp_for_all_possible_pairs(distance_matrix,
     if n_comp % 2 != 0:
         raise ValueError("Number of companies is odd; perfect matching requires even count.")
 
-    # 2) Compute VRP cost for all 2-company pairs
+    # 2) Compute VRP cost for every 2-company pair
     pair_results = []
     for company1, company2 in combinations(unique_companies, 2):
         # Filter matrix for these two companies + depot
@@ -299,7 +310,6 @@ def solve_vrp_for_all_possible_pairs(distance_matrix,
         cost_val = vrp_result.get("Total Distance", float("inf"))
         pair_results.append((company1, company2, cost_val))
 
-    # Put into DataFrame
     all_pairs_df = pd.DataFrame(pair_results, columns=["Company1", "Company2", "Total Distance"])
 
     # 3) Build a graph for min-weight perfect matching
@@ -310,10 +320,8 @@ def solve_vrp_for_all_possible_pairs(distance_matrix,
         c1, c2, cost_val = row["Company1"], row["Company2"], row["Total Distance"]
         G.add_edge(c1, c2, weight=cost_val)
 
-    # 4) Min-weight perfect matching
+    # 4) Solve min-weight perfect matching
     matching = nx.algorithms.matching.min_weight_matching(G)
-
-    # matching is a set of frozensets, e.g. {('A','B'), ('C','D')}
     chosen_pairs = []
     total_cost = 0.0
     for edge in matching:
@@ -327,48 +335,38 @@ def solve_vrp_for_all_possible_pairs(distance_matrix,
             chosen_pairs.append((b, a, cost_edge))
 
     matching_pairs_df = pd.DataFrame(chosen_pairs, columns=["Company1", "Company2", "Total Distance"])
-
     return matching_pairs_df, total_cost
 
 
 def get_filtered_matrix_for_pair(distance_matrix, company1, company2):
     """
     Filters the distance matrix for the given companies and the universal depot.
-    It considers all rows and columns that start with the company names.
+    Considers all rows/columns that start with the company names or "Universal_Depot".
     """
-    # Normalize and clean the index
     distance_matrix.index = distance_matrix.index.str.strip().str.replace('"', '').str.replace("'", '')
     distance_matrix.columns = distance_matrix.columns.str.strip().str.replace('"', '').str.replace("'", '')
 
-    # Create a list of relevant entries
     selected_companies = [
         idx for idx in distance_matrix.index
         if idx.startswith(company1) or idx.startswith(company2) or idx == "Universal_Depot"
     ]
-
-
-
-    # Filter the matrix
     filtered_matrix = distance_matrix.loc[selected_companies, selected_companies]
     return filtered_matrix
 
+
 def get_individual_company_matrices(company1, company2, distance_matrix):
     """
-    Returns separate distance matrices for each individual company and the Universal Depot.
+    Returns two distance matrices: one for 'company1' + depot, and one for 'company2' + depot.
     """
-
-    # Clean up the index to remove unwanted characters
     distance_matrix.index = distance_matrix.index.str.strip().str.replace('"', '').str.replace("'", '')
     distance_matrix.columns = distance_matrix.columns.str.strip().str.replace('"', '').str.replace("'", '')
 
-    # Function to filter the matrix for a single company
     def filter_for_company(company_name):
         relevant_nodes = [
             node for node in distance_matrix.index if node.startswith(company_name) or node == "Universal_Depot"
         ]
         return distance_matrix.loc[relevant_nodes, relevant_nodes]
 
-    # Create individual matrices
     company1_matrix = filter_for_company(company1)
     company2_matrix = filter_for_company(company2)
 

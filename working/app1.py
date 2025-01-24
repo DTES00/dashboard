@@ -2,40 +2,39 @@
 
 import itertools
 import random
+import ast
 
 import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from folium import CircleMarker, Marker, PolyLine
+import folium
+from folium import Marker, PolyLine
+from folium.features import DivIcon
 from folium.map import LayerControl
 from folium.plugins import FloatImage
 from streamlit_folium import st_folium
 
-# --- Imports for Overlap & Bounding Box Logic ---
-from bounding_box import \
-    get_best_partnerships as get_best_partnerships_bb  # Renamed for clarity
-from bounding_box import (rank_company_pairs_by_overlap_percentage,
-                          visualize_bounding_boxes)
-# --- Imports for Clustering ---
-from cluster import get_best_partnerships as get_best_partnerships_clust
-from cluster import get_clusters_for_file, rank_partnerships_using_clusters
-# --- Plotting of Routes ---
-from plot_routes import generate_route_map_fixed_with_legend
-# --- Imports for VRP ---
-from solver1 import (create_batched_distance_matrix,
-                     get_filtered_matrix_for_pair,
-                     get_individual_company_matrices, solo_routes,
-                     solve_cvrp_numeric_ids,
-                     solve_vrp_for_all_pairs_in_dataframe,
-                     solve_vrp_for_all_possible_pairs)
+import networkx as nx
 
-# -------------
-# GLOBALS
-# -------------
-map_center = [52.37, 4.95]
+# --- VRP + Overlap Logic ---
+from bounding_box import get_best_partnerships as get_best_partnerships_bb
+from bounding_box import rank_company_pairs_by_overlap_percentage
 
-# Define bounding box for the Netherlands
+# --- VRP Solver Logic ---
+from solver1 import (
+    create_batched_distance_matrix,
+    get_filtered_matrix_for_pair,
+    get_individual_company_matrices,
+    solo_routes,
+    solve_cvrp_numeric_ids,
+    solve_vrp_for_all_pairs_in_dataframe,
+    solve_vrp_for_all_possible_pairs
+)
+
+###############################################################################
+# GLOBALS & HELPERS
+###############################################################################
 NETHERLANDS_BOUNDS = {
     "min_lat": 50.5,
     "max_lat": 53.7,
@@ -43,688 +42,607 @@ NETHERLANDS_BOUNDS = {
     "max_lon": 7.22,
 }
 
-# -------------
-# FUNCTIONS
-# -------------
 def is_within_netherlands(lat, lon):
-    """Validate if a location is within the Netherlands (rough bounding box)."""
+    """Rough bounding box check."""
     return (
         NETHERLANDS_BOUNDS["min_lat"] <= lat <= NETHERLANDS_BOUNDS["max_lat"]
         and NETHERLANDS_BOUNDS["min_lon"] <= lon <= NETHERLANDS_BOUNDS["max_lon"]
     )
 
-# -------------
+def convert_df(df):
+    """DataFrame -> CSV bytes."""
+    return df.to_csv(index=False).encode('utf-8')
+
+def rename_source_sink(route_stops):
+    """'Source'/'Sink' -> 'Depot' in route stops."""
+    return ["Depot" if stop in ("Source", "Sink") else stop for stop in route_stops]
+
+def prepare_single_pair_csv(pair_df):
+    """
+    Convert a single-pair VRP result into row-per-vehicle. Columns: Company1, Company2, Routes, ...
+    """
+    rows = []
+    for idx, row in pair_df.iterrows():
+        c1 = row.get("Company1", f"Company1_{idx}")
+        c2 = row.get("Company2", f"Company2_{idx}")
+        total_cost = row.get("Total Distance", 0)
+        routes_dict = row.get("Routes", {})
+        if isinstance(routes_dict, str):
+            import ast
+            routes_dict = ast.literal_eval(routes_dict)
+        if routes_dict is None:
+            continue
+
+        for vehicle_id, stops_list in routes_dict.items():
+            cleaned = rename_source_sink(stops_list)
+            route_str = " -> ".join(map(str, cleaned))
+            rows.append({
+                "Company1": c1,
+                "Company2": c2,
+                "Vehicle ID": vehicle_id,
+                "Route": route_str,
+                "Total Cost": total_cost
+            })
+    return pd.DataFrame(rows)
+
+def prepare_pairs_vrp_csv(pair_df):
+    """
+    For multi-row bounding-box results, produce a single CSV with routes for each row.
+    """
+    all_rows = []
+    for idx, row in pair_df.iterrows():
+        c1 = row.get("Company1", f"Company1_{idx}")
+        c2 = row.get("Company2", f"Company2_{idx}")
+        total_cost = row.get("Total Distance", 0)
+        routes_dict = row.get("Routes", {})
+        if isinstance(routes_dict, str):
+            import ast
+            routes_dict = ast.literal_eval(routes_dict)
+        if routes_dict is None:
+            continue
+
+        for vehicle_id, stops_list in routes_dict.items():
+            cleaned = rename_source_sink(stops_list)
+            route_str = " -> ".join(map(str, cleaned))
+            all_rows.append({
+                "Company1": c1,
+                "Company2": c2,
+                "Vehicle ID": vehicle_id,
+                "Route": route_str,
+                "Total Cost": total_cost
+            })
+    return pd.DataFrame(all_rows)
+
+###############################################################################
+# MAP FUNCTION (Numbered Route Stops)
+###############################################################################
+import folium
+from folium import Marker, PolyLine
+from folium.features import DivIcon
+from folium.map import LayerControl
+
+def generate_route_map_fixed_with_legend(
+    depot_loc,
+    data,
+    test,
+    osrm_url="http://router.project-osrm.org",
+    profile="driving"
+):
+    # Center on avg lat/lon
+    center_lat = data["lat"].mean()
+    center_lon = data["lon"].mean()
+    map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+
+    if "Company" not in test.columns:
+        test["Company"] = "NoCompanyName"
+
+    for _, row in test.iterrows():
+        company_name = row["Company"]
+        routes_dict = row.get("Routes", {})
+        fg = folium.FeatureGroup(name=f"{company_name} Routes", show=True)
+
+        if depot_loc:
+            Marker(
+                location=depot_loc,
+                popup=f"{company_name} - Depot",
+                icon=folium.Icon(color="red", icon="home", prefix="fa")
+            ).add_to(fg)
+
+        route_colors = itertools.cycle([
+            "blue","green","purple","orange","darkred","lightred","beige","darkblue",
+            "darkgreen","cadetblue","pink","lightblue","lightgreen","gray","black"
+        ])
+
+        for vehicle_id, stops_list in routes_dict.items():
+            route_color = next(route_colors)
+            numeric_stops = [s for s in stops_list if isinstance(s, int)]
+            route_coords = []
+            for stop_idx in numeric_stops:
+                if 0 <= stop_idx < len(data):
+                    row_data = data.iloc[stop_idx]
+                    route_coords.append((row_data["lat"], row_data["lon"]))
+
+            if depot_loc and route_coords:
+                route_coords = [depot_loc] + route_coords + [depot_loc]
+
+            real_path = []
+            for i in range(len(route_coords) - 1):
+                start_lat, start_lon = route_coords[i]
+                end_lat, end_lon     = route_coords[i+1]
+                coords_str = f"{start_lon},{start_lat};{end_lon},{end_lat}"
+                url = f"{osrm_url}/route/v1/{profile}/{coords_str}?geometries=geojson&steps=true"
+                try:
+                    resp = requests.get(url)
+                    resp.raise_for_status()
+                    osrm_data = resp.json()
+                    if osrm_data.get("routes"):
+                        geometry = osrm_data["routes"][0]["geometry"]["coordinates"]
+                        for (lon_, lat_) in geometry:
+                            real_path.append((lat_, lon_))
+                except Exception as e:
+                    print(f"OSRM error {start_lat},{start_lon} -> {end_lat},{end_lon}: {e}")
+                    continue
+
+            if real_path:
+                PolyLine(locations=real_path, color=route_color, weight=3, opacity=0.5).add_to(fg)
+
+            for stop_order, (lat_, lon_) in enumerate(route_coords):
+                label_number = stop_order + 1
+                folium.map.Marker(
+                    [lat_, lon_],
+                    icon=DivIcon(
+                        icon_size=(30, 30),
+                        icon_anchor=(15, 15),
+                        html=(
+                            f"<div style='font-size:12pt;"
+                            f"color:black;"
+                            f"background-color:rgba(255,255,255,0.7);"
+                            f"border:1px solid black;"
+                            f"border-radius:15px;"
+                            f"width:30px;height:30px;"
+                            f"text-align:center;line-height:30px;'>"
+                            f"{label_number}</div>"
+                        )
+                    ),
+                    popup=f"Stop {label_number}"
+                ).add_to(fg)
+
+        fg.add_to(map_obj)
+
+    LayerControl(collapsed=False).add_to(map_obj)
+    map_file = "routes_map.html"
+    map_obj.save(map_file)
+    print(f"Map saved to {map_file}")
+    return map_obj, map_file
+
+###############################################################################
 # STREAMLIT APP
-# -------------
+###############################################################################
 
-# Title
-st.title("Dashboard")
 
-# ----------------------------------
-# STEP 1: SELECT DEPOT LOCATION
-# ----------------------------------
+# Step 1: Depot
+st.sidebar.header("Depot Location")
+lat_input = st.sidebar.number_input("Latitude", value=52.0, step=0.01, format="%.6f")
+lon_input = st.sidebar.number_input("Longitude", value=5.0, step=0.01, format="%.6f")
+
 if "depot_location" not in st.session_state:
     st.session_state["depot_location"] = None
+st.session_state["depot_location"] = (lat_input, lon_input)
 
-st.subheader("Step 1: Select a Central Depot Location")
-# Sidebar for manual depot location
-st.sidebar.header("Manual Depot Location Input")
-manual_lat = st.sidebar.number_input("Enter Latitude", value=52.0, step=0.01, format="%.6f")
-manual_lon = st.sidebar.number_input("Enter Longitude", value=5.0, step=0.01, format="%.6f")
-use_manual_location = st.sidebar.checkbox("Use manual location", value=False)
-
-if use_manual_location:
-    selected_lat = manual_lat
-    selected_lon = manual_lon
-    st.session_state["depot_location"] = (selected_lat, selected_lon)
-    st.write(f"Selected Central Depot Location: Latitude = {selected_lat}, Longitude = {selected_lon}")
-else:
-    st.write("use manual inputs to select a central depot location.")
-
-# Validate Depot location
-if st.session_state["depot_location"] is not None:
-    selected_lat, selected_lon = st.session_state["depot_location"]
-    if not is_within_netherlands(selected_lat, selected_lon):
-        st.error("The selected depot location is outside the Netherlands. Please select a valid location.")
-        st.stop()
-else:
-    st.error("Please select a depot location.")
+if not is_within_netherlands(lat_input, lon_input):
+    st.error("Depot location is outside the Netherlands. Please pick valid coords.")
     st.stop()
 
-# ----------------------------------
-# STEP 2: UPLOAD DATA
-# ----------------------------------
-st.subheader("Upload a File")
-uploaded_file = st.file_uploader("Upload file", type=["csv"])
+# Step 2: Routing Mode
+st.sidebar.header("Routing Mode")
+use_bicycle = st.sidebar.checkbox("Use Bicycle Routing", value=False)
+profile = "cycling" if use_bicycle else "driving"
 
+# Step 3: Upload
+uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 if uploaded_file is not None:
-    # Check if the uploaded file is new
     if "uploaded_file" in st.session_state and st.session_state["uploaded_file"] != uploaded_file:
-        # Clear only relevant states:
         st.session_state["uploaded_data"] = None
         st.session_state["distance_matrix_generated"] = False
         st.session_state["ranked_pairs"] = None
-        st.session_state["best_partnerships_bb"] = None
-        st.session_state["ranked_partnerships_cluster"] = None
-        st.session_state["best_partnerships_clust"] = None
+        st.session_state["pair_result_selected"] = None
         st.session_state["vrp_result_solo"] = None
         st.session_state["pair_result_bb"] = None
-        st.session_state["pair_result_cl"] = None
+        st.session_state["bb_comparison_table"] = None
         st.session_state["all_pairs_result"] = None
-        st.session_state["best_pairs"] = None
+        st.session_state["all_pairs_total_cost"] = None
 
     if "uploaded_data" not in st.session_state or st.session_state.get("uploaded_file") != uploaded_file:
         try:
             df = pd.read_csv(uploaded_file)
-            required_columns = {"name", "lat", "lon"}
-            if not required_columns.issubset(df.columns):
-                st.error(f"The uploaded file must contain the following columns: {', '.join(required_columns)}")
+            req_cols = {"name","lat","lon"}
+            if not req_cols.issubset(df.columns):
+                st.error(f"CSV must have columns {req_cols}")
                 st.stop()
-
-            # Store the new file and data in session state
             st.session_state["uploaded_file"] = uploaded_file
             st.session_state["uploaded_data"] = df
-            st.session_state["distance_matrix_generated"] = False  # Reset calculations
-
-
+            st.session_state["distance_matrix_generated"] = False
         except Exception as e:
             st.error(f"Error reading file: {e}")
             st.stop()
 
 df = st.session_state.get("uploaded_data", None)
 
-# if df is not None:
-#     st.write("Uploaded Data (Preview):")
-#     st.dataframe(df)
+# Step 4: VRP Parameters
+st.sidebar.header("Solver Params")
+nmbr_loc = st.sidebar.number_input("Max # locations/route", min_value=1, value=4)
+cost_per_km = st.sidebar.number_input("Cost per km (€)", min_value=0, value=1)
+cost_per_truck = st.sidebar.number_input("Cost per truck (€)", min_value=0, value=800)
+time_per_vrp = st.sidebar.number_input("Time limit per VRP (s)", min_value=0, value=10)
 
-# ----------------------------------
-# STEP 3: VRP PARAMETERS (SIDEBAR)
-# ----------------------------------
-st.sidebar.header("Parameters Solver")
-nmbr_loc = st.sidebar.number_input("Max number of locations per route", min_value=0, value=4)
-cost_per_km = st.sidebar.number_input("Cost (euro) per kilometer", min_value=0, value=1)
-cost_per_truck = st.sidebar.number_input("Cost (euro) per truck", min_value=0, value=800)
-exact_solution = st.sidebar.checkbox("Use Exact Solution", value=False)
-time_per_VRP = st.sidebar.number_input("Maximum time spent per VRP (seconds)", min_value=0, value=10)
-
-# ----------------------------------
-# STEP 4: GENERATE DISTANCE MATRIX
-#      and CALCULATE PARTNERSHIPS
-# ----------------------------------
+# Step 5: Generate Distance Matrix
 if df is not None and not st.session_state.get("distance_matrix_generated", False):
     try:
-        # Prepare list of locations (including depot)
-        locations = [
-            {
+        # Prepare
+        locations = []
+        for i, row in df.iterrows():
+            locations.append({
                 "lon": row["lon"],
                 "lat": row["lat"],
                 "name": row["name"],
                 "unique_name": f"{row['name']}_{i}"
-            }
-            for i, row in df.iterrows()
-        ]
+            })
+        depot_lon, depot_lat = st.session_state["depot_location"]
         locations.append({
-            "lon": selected_lon,
-            "lat": selected_lat,
+            "lon": depot_lon,
+            "lat": depot_lat,
             "name": "Universal Depot",
             "unique_name": "Universal_Depot"
         })
 
-        # 1) Automatically generate the distance matrix
-        distance_matrix = create_batched_distance_matrix(locations)
-        st.session_state["distance_matrix"] = distance_matrix
+        # Create matrix
+        dm = create_batched_distance_matrix(
+            locations,
+            batch_size=100,
+            max_workers=4,
+            base_url="http://router.project-osrm.org",
+            profile=profile
+        )
+        st.session_state["distance_matrix"] = dm
         st.session_state["distance_matrix_generated"] = True
 
-        # 2) Automatically perform Bounding Box–based Pair Ranking if not already done
-        if "ranked_pairs" not in st.session_state:
-            ranked_pairs = rank_company_pairs_by_overlap_percentage(df)
-            st.session_state["ranked_pairs"] = ranked_pairs
-            st.session_state["best_partnerships_bb"] = get_best_partnerships_bb(ranked_pairs)
+        # bounding-box logic
+        ranked_pairs = rank_company_pairs_by_overlap_percentage(df)
+        st.session_state["ranked_pairs"] = ranked_pairs
+        best_bb = get_best_partnerships_bb(ranked_pairs)
+        st.session_state["best_partnerships_bb"] = best_bb
 
+        st.success("Distance matrix + bounding-box pairs generated.")
     except Exception as e:
-        st.error(f"Error generating distance matrix or performing pair calculations: {e}")
+        st.error(f"Error generating matrix: {e}")
+        st.stop()
 
-# Always display partnerships
-st.subheader("Potential Partnerships ranked from Best to Worst")
-
-# Ensure the table is displayed even after reruns
+# Show Partnerships
+st.subheader("Ranked Partnerships by Overlap")
 if "ranked_pairs" in st.session_state and st.session_state["ranked_pairs"] is not None:
-    st.write(st.session_state["ranked_pairs"].drop(columns=["Overlap Percentage"]).reset_index(drop=True))
+    if not st.session_state["ranked_pairs"].empty:
+        st.dataframe(st.session_state["ranked_pairs"].reset_index(drop=True))
+    else:
+        st.warning("No ranked pairs found.")
 else:
-    st.warning("No partnerships available. Please upload data and generate results.")
+    st.info("Upload data + generate the distance matrix first.")
 
+st.subheader("Potential Best Partnerships (Bounding-Box)")
+best_partnerships_bb = st.session_state.get("best_partnerships_bb", None)
+if best_partnerships_bb is not None and not best_partnerships_bb.empty:
+    st.table(best_partnerships_bb.drop(columns=["Overlap Percentage"]).reset_index(drop=True))
+else:
+    st.warning("No best bounding-box partnerships found.")
 
+###############################################################################
+# SINGLE PAIR SOLUTION
+###############################################################################
+if (
+    df is not None
+    and st.session_state.get("distance_matrix_generated", False)
+    and "ranked_pairs" in st.session_state
+    and st.session_state["ranked_pairs"] is not None
+    and not st.session_state["ranked_pairs"].empty
+):
+    rp_data = st.session_state["ranked_pairs"]
+    selected_pair_idx = st.selectbox("Select a pair to solve individually", rp_data.index)
 
-
-
-if df is not None and st.session_state.get("distance_matrix_generated", False):
-    if "ranked_pairs" in st.session_state:
-        cluster_data = st.session_state["ranked_pairs"]
-        selected_pair = st.selectbox("Select a pair", options=list(cluster_data.index))
-
-    if st.button("Calculate VRP Solution for Selected Pair"):
+    if st.button("Solve VRP for Selected Pair"):
         try:
             distance_matrix = st.session_state["distance_matrix"]
+            row_sel = rp_data.loc[selected_pair_idx]
+            c1, c2 = row_sel["Company1"], row_sel["Company2"]
 
-
-            # Extract the selected pair from the stored dataframe
-            pair = cluster_data.loc[selected_pair]
-
-            # Ensure selected pair has required keys
-            company1, company2 = pair.get("Company1"), pair.get("Company2")
-            if not company1 or not company2:
-                st.error("Invalid pair selection")
-                st.stop()
-
-            # Solve VRP for the selected pair
-            pair_df = pair.to_frame().T
+            pair_df = row_sel.to_frame().T
             pair_result = solve_vrp_for_all_pairs_in_dataframe(
                 pair_df,
                 distance_matrix,
                 cost_per_truck,
                 cost_per_km,
-                time_per_VRP,
-                exact_solution,
+                time_per_vrp,
+                False,
                 nmbr_loc
             )
-
-            # Store the result in session state
-            if isinstance(pair_result, pd.DataFrame) and not pair_result.empty:
-                st.session_state["pair_result_selected"] = pair_result
-            else:
-                st.error("No VRP solution found for the selected pair")
+            if pair_result.empty:
+                st.error("No VRP solution for this pair.")
                 st.stop()
 
-            # Extract the filtered distance matrix for the two companies
-            filtered_matrix = get_filtered_matrix_for_pair(distance_matrix, company1, company2)
+            st.session_state["pair_result_selected"] = pair_result
 
-            # Get separate matrices for each company
-            distance_matrix_1, distance_matrix_2 = get_individual_company_matrices(company1, company2, filtered_matrix)
+            # Compare cost vs. solo
+            filt = get_filtered_matrix_for_pair(distance_matrix, c1, c2)
+            dm1, dm2 = get_individual_company_matrices(c1, c2, filt)
 
-            # Solve VRP for each company individually
-            comp1 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_VRP, exact_solution, nmbr_loc, distance_matrix_1)
-            comp2 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_VRP, exact_solution, nmbr_loc, distance_matrix_2)
+            solo1 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_vrp, False, nmbr_loc, dm1)
+            solo2 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_vrp, False, nmbr_loc, dm2)
 
-            # Extract total costs safely
-            total_paired_cost = pair_result.get("Total Distance").sum() if "Total Distance" in pair_result else 0
-            total_solo_cost_1 = comp1.get("Total Distance", 0)
-            total_solo_cost_2 = comp2.get("Total Distance", 0)
-            total_solo_cost = total_solo_cost_1 + total_solo_cost_2
+            paired_cost = pair_result["Total Distance"].sum()
+            solo_cost_1 = solo1.get("Total Distance", 0)
+            solo_cost_2 = solo2.get("Total Distance", 0)
+            total_solo = solo_cost_1 + solo_cost_2
+            savings = total_solo - paired_cost
+            savings_pct = (savings / total_solo * 100) if total_solo > 0 else 0
 
-            # Calculate savings
-            savings = total_solo_cost - total_paired_cost
-            savings_percentage = (savings / total_solo_cost) * 100 if total_solo_cost > 0 else 0
-
-            # Prepare comparison data for display
-            comparison_data = {
-                "Metric": ["Total Paired Cost (€)", "Total Solo Cost (€)", "Savings (€)", "Savings (%)"],
+            comp_data = {
+                "Metric": ["Paired Cost (€)", "Solo Cost Combined (€)", "Savings (€)", "Savings (%)"],
                 "Value": [
-                    f"{total_paired_cost:.2f}",
-                    f"{total_solo_cost:.2f}",
+                    f"{paired_cost:.2f}",
+                    f"{total_solo:.2f}",
                     f"{savings:.2f}",
-                    f"{savings_percentage:.2f}%"
+                    f"{savings_pct:.2f}%"
                 ]
             }
+            st.session_state["selected_pair_comparison"] = comp_data
 
-            # Display the comparison results
-            st.write("### Cost Comparison")
-            st.table(pd.DataFrame(comparison_data))
-
-        except KeyError as ke:
-            st.error(f"Missing key: {ke}")
         except Exception as e:
-            st.error(f"Error processing VRP: {e}")
+            st.error(f"Error solving pair VRP: {e}")
 
-else:
-    st.warning("Pairing data not available. Please upload a file to generate pairings.")
+if "selected_pair_comparison" in st.session_state:
+    st.write("### Selected Pair Cost Comparison")
+    st.table(pd.DataFrame(st.session_state["selected_pair_comparison"]))
 
+    # Download single pair CSV
+    pair_df = st.session_state.get("pair_result_selected", None)
+    if pair_df is not None and not pair_df.empty:
+        single_pair_csv = prepare_single_pair_csv(pair_df)
+        csv_data = convert_df(single_pair_csv)
+        st.download_button(
+            label="Download This Pair's Routes as CSV",
+            data=csv_data,
+            file_name="selected_pair_routes.csv",
+            mime="text/csv"
+        )
 
-       
-best_partnerships_bb = st.session_state.get("best_partnerships_bb", None)
-st.write("### Potential Best Partnerships")
-if best_partnerships_bb is not None:
+# Map for single pair
+if st.button("Create Map for Selected Pair"):
+    pair_df = st.session_state.get("pair_result_selected", None)
+    if pair_df is None or pair_df.empty:
+        st.warning("No pair VRP result found. Solve VRP for a pair first.")
+    else:
+        try:
+            depot_loc = st.session_state["depot_location"]
+            data_original = st.session_state["uploaded_data"]
+            route_map, map_file = generate_route_map_fixed_with_legend(
+                depot_loc,
+                data_original,
+                pair_df,
+                osrm_url="http://router.project-osrm.org",
+                profile=profile
+            )
+            st.session_state["pair_map_file"] = map_file
+            st.session_state["pair_map_generated"] = True
+            st.success("Pair route map created successfully.")
+        except Exception as e:
+            st.error(f"Error generating pair map: {e}")
 
-    st.table(best_partnerships_bb.drop(columns=["Overlap Percentage"]).reset_index(drop=True))
-else:
-    st.warning("No best partnerships data found. Please upload data to generate pairings.")
+if "pair_map_generated" in st.session_state and st.session_state["pair_map_generated"]:
+    if "pair_map_file" in st.session_state:
+        try:
+            with open(st.session_state["pair_map_file"], "r", encoding="utf-8") as f:
+                map_html = f.read()
+            components.html(map_html, height=700, width=1100)
+        except Exception:
+            st.warning("Could not render pair map inline. Please download instead.")
 
+        with open(st.session_state["pair_map_file"], "rb") as f:
+            st.download_button(
+                label="Download Pair Map HTML",
+                data=f,
+                file_name="pair_routes_map.html",
+                mime="text/html"
+            )
 
-
-
-
-# ----------------------------------
-# STEP 5: CALCULATE VRP (SOLO + PAIRS)
-# ----------------------------------
-
-
+###############################################################################
+# COMPUTE VRP FOR ALL BEST PARTNERSHIPS
+###############################################################################
+st.subheader("Solve VRP for Best Partnerships")
 
 if df is not None and st.session_state.get("distance_matrix_generated", False):
-    if st.button("Calculate VRP Solutions"):
+    if st.button("Compute VRP for Best Partnerships"):
         try:
             distance_matrix = st.session_state["distance_matrix"]
-            progress_bar = st.progress(0)
-
-            # Solve SOLO VRP
-            result_solo = solo_routes(
-                cost_per_truck, cost_per_km, time_per_VRP, exact_solution, nmbr_loc, distance_matrix
-            )
-            if isinstance(result_solo, pd.DataFrame) and not result_solo.empty:
-                st.session_state["vrp_result_solo"] = result_solo
-                st.session_state["vrp_generated"] = True
-                st.success("Individual VRP solution calculated.")
-            else:
-                st.error("No Individual VRP solution found.")
-
-            progress_bar.progress(50)
-
-            # Solve VRP for bounding box pairs
-            if "best_partnerships_bb" in st.session_state:
-                best_partnerships_bb = st.session_state["best_partnerships_bb"]
-                pair_result_bb = solve_vrp_for_all_pairs_in_dataframe(
-                    best_partnerships_bb,
+            best_bb_df = st.session_state.get("best_partnerships_bb", None)
+            if best_bb_df is not None and not best_bb_df.empty:
+                pair_res_bb = solve_vrp_for_all_pairs_in_dataframe(
+                    best_bb_df,
                     distance_matrix,
                     cost_per_truck,
                     cost_per_km,
-                    time_per_VRP,
-                    exact_solution,
+                    time_per_vrp,
+                    False,
                     nmbr_loc
                 )
-                if isinstance(pair_result_bb, pd.DataFrame) and not pair_result_bb.empty:
-                    st.session_state["pair_result_bb"] = pair_result_bb
-                    st.success("Bounding-Box VRP solution calculated.")
+                if not pair_res_bb.empty:
+                    st.session_state["pair_result_bb"] = pair_res_bb
+                    
+                    # Now build the comparison table for each row
+                    comp_rows = []
+                    for idx, row in pair_res_bb.iterrows():
+                        c1 = row["Company1"]
+                        c2 = row["Company2"]
+                        paired_cost = row["Total Distance"]
+
+                        # Solve individually
+                        # filter the matrix
+                        filt = get_filtered_matrix_for_pair(distance_matrix, c1, c2)
+                        dm1, dm2 = get_individual_company_matrices(c1, c2, filt)
+                        solo1 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_vrp, False, nmbr_loc, dm1)
+                        solo2 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_vrp, False, nmbr_loc, dm2)
+                        cost1 = solo1.get("Total Distance", 0)
+                        cost2 = solo2.get("Total Distance", 0)
+                        total_solo = cost1 + cost2
+                        savings = total_solo - paired_cost
+                        savings_pct = (savings / total_solo * 100) if total_solo > 0 else 0
+
+                        comp_rows.append({
+                            "Company1": c1,
+                            "Company2": c2,
+                            "Paired Cost (€)": paired_cost,
+                            "Solo Cost (C1)": cost1,
+                            "Solo Cost (C2)": cost2,
+                            "Total Solo (€)": total_solo,
+                            "Savings (€)": savings,
+                            "Savings (%)": savings_pct
+                        })
+                    bb_comp_df = pd.DataFrame(comp_rows)
+                    st.session_state["bb_comparison_table"] = bb_comp_df
                 else:
-                    st.error("No pair VRP solution found (Bounding-box).")
-            progress_bar.progress(75)
-
-            # # Solve VRP for cluster-based pairs
-            # if "ranked_partnerships_cluster" in st.session_state:
-            #     best_partnerships_cl = st.session_state["ranked_partnerships_cluster"]
-            #     pair_result_cl = solve_vrp_for_all_pairs_in_dataframe(
-            #         best_partnerships_cl,
-            #         distance_matrix,
-            #         cost_per_truck,
-            #         cost_per_km,
-            #         time_per_VRP,
-            #         exact_solution,
-            #         nmbr_loc
-            #     )
-            #     if isinstance(pair_result_cl, pd.DataFrame) and not pair_result_cl.empty:
-            #         st.session_state["pair_result_cl"] = pair_result_cl
-            #         st.success("Cluster pair VRP solution calculated.")
-            #         progress_bar.progress(100)
-            #     else:
-            #         st.error("No pair VRP solution found (Cluster).")
-
+                    st.warning("No bounding-box pair VRP solutions found.")
+            else:
+                st.warning("No best partnerships available.")
         except Exception as e:
-            st.error(f"Error processing VRP: {e}")
-# ----------------------------------
-# STEP 6: COMPARISON TABLES (Solo vs. Pairs)
-# ----------------------------------
-st.subheader("Comparison of Solo vs. Paired Routes")
+            st.error(f"Error computing bounding-box VRP: {e}")
 
-if "vrp_result_solo" in st.session_state:
-    # Extract solo cost
-    solo_costs = st.session_state["vrp_result_solo"].copy()
-    solo_costs = solo_costs[["Company", "Total Distance"]]
-    solo_costs.rename(columns={"Total Distance": "Solo Route Cost (€)"}, inplace=True)
-
-    # Overlap-based pairs
-    if "pair_result_bb" in st.session_state:
-        pair_costs_bb = st.session_state["pair_result_bb"].copy()
-        pair_costs_bb = pair_costs_bb[["Company1", "Company2", "Total Distance"]]
-        pair_costs_bb.rename(columns={"Total Distance": "Paired Route Cost (€)"}, inplace=True)
-
-        # Merge solo costs
-        pair_costs_merged_bb = pd.merge(
-            pair_costs_bb,
-            solo_costs,
-            left_on="Company1",
-            right_on="Company",
-            how="left"
-        ).rename(columns={"Solo Route Cost (€)": "Solo Cost (Company1)"})
-
-        pair_costs_merged_bb = pd.merge(
-            pair_costs_merged_bb,
-            solo_costs,
-            left_on="Company2",
-            right_on="Company",
-            how="left"
-        ).rename(columns={"Solo Route Cost (€)": "Solo Cost (Company2)"})
-
-        # Drop duplicate columns
-        pair_costs_merged_bb.drop(
-            columns=[col for col in ["Company_x", "Company_y"] if col in pair_costs_merged_bb.columns],
-            inplace=True
+# Show bounding-box routes CSV
+if "pair_result_bb" in st.session_state and st.session_state["pair_result_bb"] is not None:
+    if not st.session_state["pair_result_bb"].empty:
+        st.write("### Download Full Bounding-Box Partnerships VRP Routes as CSV")
+        all_pairs_csv = prepare_pairs_vrp_csv(st.session_state["pair_result_bb"])
+        csv_data = convert_df(all_pairs_csv)
+        st.download_button(
+            label="Download Bounding-Box Partnerships Routes CSV",
+            data=csv_data,
+            file_name="bounding_box_all_pairs_routes.csv",
+            mime="text/csv"
         )
 
-        # Calculate total solo cost and savings
-        pair_costs_merged_bb["Total Solo Cost (€)"] = (
-            pair_costs_merged_bb["Solo Cost (Company1)"] + pair_costs_merged_bb["Solo Cost (Company2)"]
-        )
-        pair_costs_merged_bb["Savings (€)"] = (
-            pair_costs_merged_bb["Total Solo Cost (€)"] - pair_costs_merged_bb["Paired Route Cost (€)"]
-        )
+# Show bounding-box comparison table
+if "bb_comparison_table" in st.session_state and st.session_state["bb_comparison_table"] is not None:
+    st.write("### Bounding-Box VRP Comparison Table")
+    df_bb_comp = st.session_state["bb_comparison_table"]
+    st.dataframe(df_bb_comp.style.format({"Paired Cost (€)": "{:.2f}",
+                                          "Solo Cost (C1)": "{:.2f}",
+                                          "Solo Cost (C2)": "{:.2f}",
+                                          "Total Solo (€)": "{:.2f}",
+                                          "Savings (€)": "{:.2f}",
+                                          "Savings (%)": "{:.2f}"}))
 
-        # Round
-        pair_costs_merged_bb = pair_costs_merged_bb.round(2)
 
-    # # Cluster-based pairs
-    # if "pair_result_cl" in st.session_state:
-    #     pair_costs_cl = st.session_state["pair_result_cl"].copy()
-    #     pair_costs_cl = pair_costs_cl[["Company1", "Company2", "Total Distance"]]
-    #     pair_costs_cl.rename(columns={"Total Distance": "Paired Route Cost (€)"}, inplace=True)
+###############################################################################
+# SOLO + GLOBAL MATCHING
+###############################################################################
+st.subheader("Compute SOLO VRP & Global Perfect Matching")
 
-    #     # Merge solo costs
-    #     pair_costs_merged_cl = pd.merge(
-    #         pair_costs_cl,
-    #         solo_costs,
-    #         left_on="Company1",
-    #         right_on="Company",
-    #         how="left"
-    #     ).rename(columns={"Solo Route Cost (€)": "Solo Cost (Company1)"})
+colA, colB = st.columns(2)
 
-    #     pair_costs_merged_cl = pd.merge(
-    #         pair_costs_merged_cl,
-    #         solo_costs,
-    #         left_on="Company2",
-    #         right_on="Company",
-    #         how="left"
-    #     ).rename(columns={"Solo Route Cost (€)": "Solo Cost (Company2)"})
+with colA:
+    if st.button("Compute SOLO VRP"):
+        try:
+            distance_matrix = st.session_state["distance_matrix"]
+            solo_df = solo_routes(
+                cost_per_truck,
+                cost_per_km,
+                time_per_vrp,
+                False,
+                nmbr_loc,
+                distance_matrix
+            )
+            if not solo_df.empty:
+                st.session_state["vrp_result_solo"] = solo_df
+                st.success("Individual (solo) VRP solution computed.")
+            else:
+                st.warning("No solo VRP solution found.")
+        except Exception as e:
+            st.error(f"Error computing SOLO VRP: {e}")
 
-    #     pair_costs_merged_cl.drop(
-    #         columns=[col for col in ["Company_x", "Company_y"] if col in pair_costs_merged_cl.columns],
-    #         inplace=True
-    #     )
-
-    #     pair_costs_merged_cl["Total Solo Cost (€)"] = (
-    #         pair_costs_merged_cl["Solo Cost (Company1)"] + pair_costs_merged_cl["Solo Cost (Company2)"]
-    #     )
-    #     pair_costs_merged_cl["Savings (€)"] = (
-    #         pair_costs_merged_cl["Total Solo Cost (€)"] - pair_costs_merged_cl["Paired Route Cost (€)"]
-    #     )
-    #     pair_costs_merged_cl = pair_costs_merged_cl.round(2)
-
-    # Style
-    st.markdown(
-        """
-        <style>
-        div.block-container {padding-top: 1rem;}
-        table {
-            width: 100%;
-            text-align: center;
-        }
-        th {
-            background-color: #f4f4f4;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-    if "pair_result_bb" in st.session_state:
-        st.markdown("### Solo vs Bounding-Box")
-        st.dataframe(pair_costs_merged_bb.set_index(["Company1", "Company2"]))
-    else:
-        st.write("Bounding-Box data not available.")
-
-    # if "pair_result_cl" in st.session_state:
-    #     st.markdown("### Solo vs Cluster-Based")
-    #     st.dataframe(pair_costs_merged_cl.set_index(["Company1", "Company2"]))
-    # else:
-    #     st.write("Cluster-Based data not available.")
-
-    # Calculate total costs for quick overview
-    total_solo_cost = solo_costs["Solo Route Cost (€)"].sum()
-    total_bb_cost = (
-        st.session_state["pair_result_bb"]["Total Distance"].sum()
-        if "pair_result_bb" in st.session_state
-        else 0.0
-    )
-    total_cl_cost = (
-        st.session_state["pair_result_cl"]["Total Distance"].sum()
-        if "pair_result_cl" in st.session_state
-        else 0.0
-    )
-
-    # Display totals
-    st.markdown("### Total Route Costs Summary")
-    c1, c2= st.columns(2)
-
-    with c1:
-        st.metric(label="Total Solo Route Cost (€)", value=f"{total_solo_cost:.2f}")
-
-    with c2:
-        st.metric(label="Total Bounding-Box Route Cost (€)", value=f"{total_bb_cost:.2f}")
-
-else:
-    pass  # If there's no solo result, VRP probably not calculated yet.
-
-# ----------------------------------
-# STEP 7: ALL-COMPANIES PAIRING (Perfect Matching)
-# ----------------------------------
-st.subheader("Optimal paired Solution")
-
-if df is not None and st.session_state.get("distance_matrix_generated", False):
-    if st.button("Compute Optimal solution"):
-        # Use the new solve_vrp_for_all_possible_pairs with perfect matching
+with colB:
+    if st.button("Compute Global Matching"):
         distance_matrix = st.session_state["distance_matrix"]
         try:
-            matching_pairs_df, total_cost = solve_vrp_for_all_possible_pairs(
+            global_pairs_df, total_global_cost = solve_vrp_for_all_possible_pairs(
                 distance_matrix,
                 cost_per_truck,
                 cost_per_km,
-                time_per_VRP,
-                exact_solution,
+                time_per_vrp,
+                False,
                 nmbr_loc
             )
-
-            st.session_state["all_pairs_result"] = matching_pairs_df
-            st.session_state["all_pairs_total_cost"] = total_cost
-
+            st.session_state["all_pairs_result"] = global_pairs_df
+            st.session_state["all_pairs_total_cost"] = total_global_cost
             st.success("Global minimal pairing found (all companies).")
-            st.write("### Matching Pairs")
-            st.dataframe(matching_pairs_df)
-            st.write(f"**Total Cost**: €{total_cost:,.2f}")
 
+            st.write("### Matching Pairs")
+            st.dataframe(global_pairs_df)
+            st.write(f"**Total Cost**: €{total_global_cost:,.2f}")
         except Exception as e:
             st.error(f"Error solving global pairing: {e}")
-else:
-    st.warning("Upload data and generate the distance matrix before computing global pairing.")
 
-# ----------------------------------
-# STEP 8: FINAL COST COMPARISON (If needed)
-# ----------------------------------
-st.subheader("Final Cost Comparison")
+# Download SOLO results
+if "vrp_result_solo" in st.session_state and st.session_state["vrp_result_solo"] is not None:
+    st.write("### Download SOLO VRP CSV")
+    solo_csv_data = convert_df(st.session_state["vrp_result_solo"])
+    st.download_button(
+        label="Download SOLO VRP",
+        data=solo_csv_data,
+        file_name="solo_vrp.csv",
+        mime="text/csv"
+    )
 
-if (
-    "vrp_result_solo" in st.session_state
-    and "pair_result_bb" in st.session_state
-    and "pair_result_cl" in st.session_state
-    and "all_pairs_result" in st.session_state
-):
-    total_solo_cost = st.session_state["vrp_result_solo"]["Total Distance"].sum()
-    total_bb_cost = st.session_state["pair_result_bb"]["Total Distance"].sum()
-    total_cl_cost = st.session_state["pair_result_cl"]["Total Distance"].sum()
-    total_global_pairs = st.session_state["all_pairs_total_cost"]
+###############################################################################
+# FINAL COST COMPARISON
+###############################################################################
 
-    comparison_data = {
-        "Solution Type": [
-            "Solo Routes",
-            "Bounding-Box Pairs",
-            "Cluster-Based Pairs",
-            "Global Perfect Matching (All in Pairs)",
-        ],
-        "Total Cost (€)": [
-            total_solo_cost,
-            total_bb_cost,
-            total_cl_cost,
-            total_global_pairs,
-        ],
-    }
 
+def get_total_cost_from_pairs(df):
+    if df is not None and not df.empty:
+        return df["Total Distance"].sum()
+    return None
+
+solo_df = st.session_state.get("vrp_result_solo", None)
+pairs_bb_df = st.session_state.get("pair_result_bb", None)
+all_pairs_df = st.session_state.get("all_pairs_result", None)
+all_pairs_cost = st.session_state.get("all_pairs_total_cost", None)
+
+total_solo_cost = solo_df["Total Distance"].sum() if solo_df is not None and not solo_df.empty else None
+total_bb_cost = get_total_cost_from_pairs(pairs_bb_df)
+total_global_pairs = all_pairs_cost
+
+comparison_data = {
+    "Solution Type": [],
+    "Total Cost (€)": []
+}
+if total_solo_cost is not None:
+    comparison_data["Solution Type"].append("Solo Routes")
+    comparison_data["Total Cost (€)"].append(total_solo_cost)
+
+if total_bb_cost is not None:
+    comparison_data["Solution Type"].append("Bounding-Box Pairs")
+    comparison_data["Total Cost (€)"].append(total_bb_cost)
+
+if total_global_pairs is not None:
+    comparison_data["Solution Type"].append("Global Perfect Matching (All in Pairs)")
+    comparison_data["Total Cost (€)"].append(total_global_pairs)
+
+if comparison_data["Solution Type"]:
     comparison_df = pd.DataFrame(comparison_data)
-    st.table(comparison_df.style.format({"Total Cost (€)": "{:.2f}"}))
-
-    # Indicate which is best
-    min_cost_solution = comparison_df.loc[comparison_df["Total Cost (€)"].idxmin()]
-    st.success(
-        f"**Optimal Solution:** {min_cost_solution['Solution Type']} "
-        f"with a total cost of €{min_cost_solution['Total Cost (€)']:.2f}"
-    )
+    st.dataframe(comparison_df.style.format({"Total Cost (€)": "{:.2f}"}))
+    if len(comparison_data["Solution Type"]) >= 2:
+        min_cost_idx = comparison_df["Total Cost (€)"].idxmin()
+        best_sol = comparison_df.loc[min_cost_idx, "Solution Type"]
+        best_val = comparison_df.loc[min_cost_idx, "Total Cost (€)"]
+        st.success(f"Optimal solution so far: {best_sol} at €{best_val:.2f}")
 else:
-    st.info("Compute VRP solutions and Global Perfect Matching to see the final comparison.")
+    st.info("Compute VRP solutions (solo, bounding-box, global) to see final comparison.")
 
-# ----------------------------------
-# STEP 9: DISPLAY VRP RESULTS (Solo & Pair)
-# ----------------------------------
-if "vrp_result_solo" in st.session_state:
-    solo_df = st.session_state["vrp_result_solo"]
-    st.write("## Solo VRP Solution:")
-    for idx, row in solo_df.iterrows():
-        company_name = row.get("Company", f"Company {idx + 1}")
-        st.subheader(f"Route for {company_name}")
-
-        routes = row.get("Routes", {})
-        if isinstance(routes, str):
-            import ast
-            routes = ast.literal_eval(routes)
-        for vehicle_id, route in (routes or {}).items():
-            st.write(f"Vehicle {vehicle_id}: {' -> '.join(map(str, route))}")
-
-        total_distance = row.get("Total Distance", None)
-        if total_distance is not None:
-            st.write(f"Total Cost: {total_distance:.1f} €")
-
-if "pair_result_bb" in st.session_state:
-    pair_result_bb = st.session_state["pair_result_bb"]
-    st.write("## Pair VRP Solution:")
-    for idx, row in pair_result_bb.iterrows():
-        company1 = row.get("Company1")
-        company2 = row.get("Company2")
-        st.subheader(f"Route for: {company1} & {company2}")
-
-        routes = row.get("Routes", {})
-        if isinstance(routes, str):
-            import ast
-            routes = ast.literal_eval(routes)
-        for vehicle_id, route in (routes or {}).items():
-            st.write(f"Vehicle {vehicle_id}: {' -> '.join(map(str, route))}")
-
-        total_distance = row.get("Total Distance", None)
-        if total_distance is not None:
-            st.write(f"Total Cost: {total_distance:.1f} €")
-
-if "pair_result_cl" in st.session_state:
-    pair_result_cl = st.session_state["pair_result_cl"]
-    st.write("## Pair VRP Solution (Cluster-Based):")
-    for idx, row in pair_result_cl.iterrows():
-        company1 = row.get("Company1")
-        company2 = row.get("Company2")
-        st.subheader(f"Route for: {company1} & {company2}")
-
-        routes = row.get("Routes", {})
-        if isinstance(routes, str):
-            import ast
-            routes = ast.literal_eval(routes)
-        for vehicle_id, route in (routes or {}).items():
-            st.write(f"Vehicle {vehicle_id}: {' -> '.join(map(str, route))}")
-
-        total_distance = row.get("Total Distance", None)
-        if total_distance is not None:
-            st.write(f"Total Cost: {total_distance:.1f} €")
-
-# ----------------------------------
-# OPTIONAL STEP: ROUTE MAP VISUALIZATION
-# ----------------------------------
-st.subheader("Route Visualization (Solo Routes)")
-
-# Check if VRP results are generated
-if st.session_state.get("vrp_generated", False):
-    if st.button("Generate Route Visualization"):
-        vrp_result = st.session_state.get("vrp_result_solo", None)
-        if vrp_result is not None and "route_map" not in st.session_state:
-            try:
-                depot_location = st.session_state["depot_location"]
-                route_map, map_file = generate_route_map_fixed_with_legend(depot_location, df, vrp_result)
-                st.session_state["route_map"] = route_map
-                st.session_state["map_file"] = map_file
-                st.success("Route visualization generated successfully.")
-            except Exception as e:
-                st.error(f"Error generating the map: {e}")
-
-    # Display the map if available
-    if "map_file" in st.session_state:
-        try:
-            with open(st.session_state["map_file"], "r", encoding="utf-8") as map_file:
-                map_html = map_file.read()
-            components.html(map_html, height=700, width=1100)
-        except Exception:
-            st.warning("The interactive map could not be rendered inline. Please download the map instead.")
-
-        # Download button for the map file
-        with open(st.session_state["map_file"], "rb") as file:
-            st.download_button(
-                label="Download Map as HTML",
-                data=file,
-                file_name="routes_map.html",
-                mime="text/html",
-            )
-else:
-    st.warning("Please generate VRP solutions first.")
-
-st.subheader("Download VRP Results")
-
-# This is just to convert df in csv
-def convert_df(df):
-    return df.to_csv(index=False).encode('utf-8')
-
-# Download button for solo results
-if "vrp_result_solo" in st.session_state:
-    solo_df = st.session_state["vrp_result_solo"]
-    st.write("## Download solo route solution:")
-
-    csv = convert_df(solo_df)
-    st.download_button(
-        label="Download solo route results as csv file",
-        data=csv,
-        file_name='solo_vrp_results.csv',
-        mime='text/csv',
-    )
-
-# Download button for paired results
-# Bounding box:
-if "pair_result_bb" in st.session_state:
-    pair_result_bb = st.session_state["pair_result_bb"]
-    st.write("## Download bounding box paired solution:")
-
-    csv = convert_df(pair_result_bb)
-    st.download_button(
-        label="Download bounding box paired results as csv file",
-        data=csv,
-        file_name='pair_vrp_bb_results.csv',
-        mime='text/csv',
-    )
-
-# Download solutoin for paired results
-# Cluster:
-#if "pair_result_cl" in st.session_state:
-    #pair_result_cl = st.session_state["pair_result_cl"]
-    #st.write("## Download cluster paired solution:")
-
-    #csv = convert_df(pair_result_cl)
-    #st.download_button(
-        #label="Download cluster paired solution as csv",
-        #data=csv,
-        #file_name='pair_vrp_cl_results.csv',
-        #mime='text/csv',)
-
-# ----------------------------------
-# FINAL DOWNLOAD BUTTON (Placeholder)
-# ----------------------------------
-st.write("Download data")
-st.download_button(
-    label="Download data (placeholder)",
-    data="no_data",
-    file_name="empty.csv",
-    mime="text/csv"
-)
+st.write("---")
+st.write("End of App.")
