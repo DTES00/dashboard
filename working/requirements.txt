@@ -1,0 +1,15 @@
+pandas
+geopandas
+shapely
+networkx
+requests
+numpy
+scikit-learn
+folium
+matplotlib
+joblib
+numba
+streamlit
+ipython
+pyvrp
+vrpy
