@@ -147,7 +147,7 @@ def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx,
     # vrp.best_value is the sum of edge costs in the solution (in meters).
     # Convert cost from meters to km and add cost per truck (# of vehicles).
     num_vehicles = len(vrp.best_routes)
-    dist_in_km = vrp.best_value / 1000.0
+    dist_in_km = vrp.best_value 
     total_cost = dist_in_km * cost_per_km + num_vehicles * cost_per_truck
 
     return {

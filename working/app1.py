@@ -275,6 +275,8 @@ cost_per_km = st.sidebar.number_input("Cost per km (€)", min_value=0, value=1)
 cost_per_truck = st.sidebar.number_input("Cost per truck (€)", min_value=0, value=800)
 time_per_vrp = st.sidebar.number_input("Time limit per VRP (s)", min_value=0, value=10)
 
+
+
 # Step 5: Generate Distance Matrix
 if df is not None and not st.session_state.get("distance_matrix_generated", False):
     try:
@@ -289,8 +291,8 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             })
         depot_lon, depot_lat = st.session_state["depot_location"]
         locations.append({
-            "lon": depot_lon,
-            "lat": depot_lat,
+            "lon": depot_lat,
+            "lat": depot_lon,
             "name": "Universal Depot",
             "unique_name": "Universal_Depot"
         })
@@ -306,6 +308,8 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
         st.session_state["distance_matrix"] = dm
         st.session_state["distance_matrix_generated"] = True
 
+        st.session_state["distance_matrix"] = st.session_state["distance_matrix"] / 1000
+        st.table(st.session_state["distance_matrix"])
         # bounding-box logic
         ranked_pairs = rank_company_pairs_by_overlap_percentage(df)
         st.session_state["ranked_pairs"] = ranked_pairs
