@@ -136,10 +136,14 @@ def generate_route_map_fixed_with_legend(
     if "Company" not in test.columns:
         test["Company"] = "NoCompanyName"
 
+    st.table(test)
+    st.table(data)
+
     for _, row in test.iterrows():
         company_name = row["Company"]
         routes_dict = row.get("Routes", {})
         fg = folium.FeatureGroup(name=f"{company_name} Routes", show=True)
+        
 
         if depot_loc:
             Marker(
@@ -302,14 +306,14 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             locations,
             batch_size=100,
             max_workers=4,
-            base_url="http://router.project-osrm.org",
+            base_url="http://localhost:5000",
             profile=profile
         )
         st.session_state["distance_matrix"] = dm
         st.session_state["distance_matrix_generated"] = True
 
         st.session_state["distance_matrix"] = st.session_state["distance_matrix"] / 1000
-        st.table(st.session_state["distance_matrix"])
+        st.dataframe(st.session_state["distance_matrix"])
         # bounding-box logic
         ranked_pairs = rank_company_pairs_by_overlap_percentage(df)
         st.session_state["ranked_pairs"] = ranked_pairs
@@ -375,6 +379,7 @@ if (
 
             # Compare cost vs. solo
             filt = get_filtered_matrix_for_pair(distance_matrix, c1, c2)
+            st.session_state["paired_selected_data"] = filt
             dm1, dm2 = get_individual_company_matrices(c1, c2, filt)
 
             solo1 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_vrp, False, nmbr_loc, dm1)
@@ -417,6 +422,35 @@ if "selected_pair_comparison" in st.session_state:
             mime="text/csv"
         )
 
+def filter_stops_from_routes(pair_df, data_original):
+    """
+    Filters data_original to retain only the stop locations that are referenced in pair_df['Routes'].
+    Removes company headquarters that are not part of the routes.
+    
+    Parameters:
+    pair_df (pd.DataFrame): DataFrame containing route mappings.
+    data_original (pd.DataFrame): DataFrame containing company locations and stop coordinates.
+    
+    Returns:
+    pd.DataFrame: Filtered version of data_original containing only relevant stops.
+    """
+    # Extract all stop indices from the routes in pair_df
+    route_dict = pair_df.iloc[0]["Routes"]
+    stops_in_routes = set()
+    
+    for vehicle_routes in route_dict.values():
+        for stop in vehicle_routes:
+            if isinstance(stop, int):  # Only consider numeric stops, ignoring 'Source' and 'Sink'
+                stops_in_routes.add(stop)
+    
+    # Filter data_original to include only these stops (excluding company HQs not in stops)
+    filtered_data_original = data_original.iloc[list(stops_in_routes)]
+    
+    return filtered_data_original
+
+
+
+
 # Map for single pair
 if st.button("Create Map for Selected Pair"):
     pair_df = st.session_state.get("pair_result_selected", None)
@@ -425,10 +459,11 @@ if st.button("Create Map for Selected Pair"):
     else:
         try:
             depot_loc = st.session_state["depot_location"]
+            
             data_original = st.session_state["uploaded_data"]
             route_map, map_file = generate_route_map_fixed_with_legend(
                 depot_loc,
-                data_original,
+                filter_stops_from_routes(pair_df, data_original),
                 pair_df,
                 osrm_url="http://router.project-osrm.org",
                 profile=profile
@@ -485,6 +520,7 @@ if df is not None and st.session_state.get("distance_matrix_generated", False):
                         c1 = row["Company1"]
                         c2 = row["Company2"]
                         paired_cost = row["Total Distance"]
+                        
 
                         # Solve individually
                         # filter the matrix

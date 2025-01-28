@@ -14,7 +14,7 @@ from itertools import combinations
 ################################################################################
 
 def get_osrm_distance_submatrix(src_batch, dst_batch,
-                                base_url="http://router.project-osrm.org",
+                                base_url="http://localhost:5000",
                                 profile="driving"):
     """
     Send a table request to OSRM to get distances between src_batch and dst_batch.
@@ -43,8 +43,8 @@ def get_osrm_distance_submatrix(src_batch, dst_batch,
         return None, src_batch, dst_batch
 
 
-def create_batched_distance_matrix(locations, batch_size=10, max_workers=4,
-                                   base_url="http://router.project-osrm.org",
+def create_batched_distance_matrix(locations, batch_size=100, max_workers=4,
+                                   base_url="http://localhost:5000",
                                    profile="driving"):
     """
     Create a complete non-symmetric distance matrix by batching location pairs
