@@ -32,12 +32,6 @@ from solver1 import (
     solve_vrp_for_all_possible_pairs
 )
 
-from cluster import (
-    get_clusters_for_file,
-    rank_partnerships_using_clusters,
-    get_best_partnerships as get_best_partnerships_clust,
-)
-
 ###############################################################################
 # GLOBALS & HELPERS
 ###############################################################################
@@ -142,14 +136,10 @@ def generate_route_map_fixed_with_legend(
     if "Company" not in test.columns:
         test["Company"] = "NoCompanyName"
 
-    st.table(test)
-    st.table(data)
-
     for _, row in test.iterrows():
         company_name = row["Company"]
         routes_dict = row.get("Routes", {})
         fg = folium.FeatureGroup(name=f"{company_name} Routes", show=True)
-        
 
         if depot_loc:
             Marker(
@@ -285,8 +275,6 @@ cost_per_km = st.sidebar.number_input("Cost per km (€)", min_value=0, value=1)
 cost_per_truck = st.sidebar.number_input("Cost per truck (€)", min_value=0, value=800)
 time_per_vrp = st.sidebar.number_input("Time limit per VRP (s)", min_value=0, value=10)
 
-
-
 # Step 5: Generate Distance Matrix
 if df is not None and not st.session_state.get("distance_matrix_generated", False):
     try:
@@ -301,8 +289,8 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             })
         depot_lon, depot_lat = st.session_state["depot_location"]
         locations.append({
-            "lon": depot_lat,
-            "lat": depot_lon,
+            "lon": depot_lon,
+            "lat": depot_lat,
             "name": "Universal Depot",
             "unique_name": "Universal_Depot"
         })
@@ -312,52 +300,32 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             locations,
             batch_size=100,
             max_workers=4,
-            base_url="http://localhost:5000",
+            base_url="http://router.project-osrm.org",
             profile=profile
         )
         st.session_state["distance_matrix"] = dm
         st.session_state["distance_matrix_generated"] = True
 
-        st.session_state["distance_matrix"] = st.session_state["distance_matrix"] / 1000
-        st.dataframe(st.session_state["distance_matrix"])
-      
-        # 2) Automatically perform Bounding Box–based Pair Ranking
+        # bounding-box logic
         ranked_pairs = rank_company_pairs_by_overlap_percentage(df)
         st.session_state["ranked_pairs"] = ranked_pairs
-        best_partnerships_bb = get_best_partnerships_bb(ranked_pairs)
-        st.session_state["best_partnerships_bb"] = best_partnerships_bb
+        best_bb = get_best_partnerships_bb(ranked_pairs)
+        st.session_state["best_partnerships_bb"] = best_bb
 
-
-        # 3) Automatically perform Cluster–based Pair Ranking
-        distance_matrix_for_clusters = dm.iloc[:-1, :-1].values
-        labels = get_clusters_for_file(distance_matrix_for_clusters)
-
-        # Rank partnerships by cluster
-        ranked_partnerships_cluster = rank_partnerships_using_clusters(df, labels, distance_matrix_for_clusters)
-        st.session_state["ranked_partnerships_cluster"] = ranked_partnerships_cluster
-
-        # Identify best cluster-based partnerships
-        best_partnerships_clust_ = get_best_partnerships_clust(ranked_partnerships_cluster)
-        st.session_state["best_partnerships_clust"] = best_partnerships_clust_
-
+        st.success("Distance matrix + bounding-box pairs generated.")
     except Exception as e:
-        st.error(f"Error generating distance matrix or performing pair calculations: {e}")
+        st.error(f"Error generating matrix: {e}")
+        st.stop()
 
-st.write("## Potential Best Partnerships")
-
-if "best_partnerships_bb" in st.session_state and "best_partnerships_clust" in st.session_state:
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("### Bounding-Box")
-        st.table(st.session_state["best_partnerships_bb"])
-
-    with col2:
-        st.write("### Cluster-Based")
-        cluster_data_without_id = st.session_state["best_partnerships_clust"].drop(columns=["Cluster ID"])
-        st.table(cluster_data_without_id)
+# Show Partnerships
+st.subheader("Ranked Partnerships by Overlap")
+if "ranked_pairs" in st.session_state and st.session_state["ranked_pairs"] is not None:
+    if not st.session_state["ranked_pairs"].empty:
+        st.dataframe(st.session_state["ranked_pairs"].reset_index(drop=True))
+    else:
+        st.warning("No ranked pairs found.")
 else:
-    st.warning("Pairing data not available. Please upload a file to generate pairings.")
+    st.info("Upload data + generate the distance matrix first.")
 
 st.subheader("Potential Best Partnerships (Bounding-Box)")
 best_partnerships_bb = st.session_state.get("best_partnerships_bb", None)
@@ -403,7 +371,6 @@ if (
 
             # Compare cost vs. solo
             filt = get_filtered_matrix_for_pair(distance_matrix, c1, c2)
-            st.session_state["paired_selected_data"] = filt
             dm1, dm2 = get_individual_company_matrices(c1, c2, filt)
 
             solo1 = solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, time_per_vrp, False, nmbr_loc, dm1)
@@ -446,35 +413,6 @@ if "selected_pair_comparison" in st.session_state:
             mime="text/csv"
         )
 
-def filter_stops_from_routes(pair_df, data_original):
-    """
-    Filters data_original to retain only the stop locations that are referenced in pair_df['Routes'].
-    Removes company headquarters that are not part of the routes.
-    
-    Parameters:
-    pair_df (pd.DataFrame): DataFrame containing route mappings.
-    data_original (pd.DataFrame): DataFrame containing company locations and stop coordinates.
-    
-    Returns:
-    pd.DataFrame: Filtered version of data_original containing only relevant stops.
-    """
-    # Extract all stop indices from the routes in pair_df
-    route_dict = pair_df.iloc[0]["Routes"]
-    stops_in_routes = set()
-    
-    for vehicle_routes in route_dict.values():
-        for stop in vehicle_routes:
-            if isinstance(stop, int):  # Only consider numeric stops, ignoring 'Source' and 'Sink'
-                stops_in_routes.add(stop)
-    
-    # Filter data_original to include only these stops (excluding company HQs not in stops)
-    filtered_data_original = data_original.iloc[list(stops_in_routes)]
-    
-    return filtered_data_original
-
-
-
-
 # Map for single pair
 if st.button("Create Map for Selected Pair"):
     pair_df = st.session_state.get("pair_result_selected", None)
@@ -483,11 +421,10 @@ if st.button("Create Map for Selected Pair"):
     else:
         try:
             depot_loc = st.session_state["depot_location"]
-            
             data_original = st.session_state["uploaded_data"]
             route_map, map_file = generate_route_map_fixed_with_legend(
                 depot_loc,
-                filter_stops_from_routes(pair_df, data_original),
+                data_original,
                 pair_df,
                 osrm_url="http://router.project-osrm.org",
                 profile=profile
@@ -544,7 +481,6 @@ if df is not None and st.session_state.get("distance_matrix_generated", False):
                         c1 = row["Company1"]
                         c2 = row["Company2"]
                         paired_cost = row["Total Distance"]
-                        
 
                         # Solve individually
                         # filter the matrix
