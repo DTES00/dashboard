@@ -111,7 +111,7 @@ def rank_company_pairs_by_overlap_percentage(data):
         # Calculate bounding box areas
         area1 = calculate_bounding_box_area(box1)
         area2 = calculate_bounding_box_area(box2)
-        total_area = area1 + area2 - overlap_area
+        total_area = area1 + area2
 
         # Calculate overlap percentage
         overlap_percentage = (overlap_area / total_area * 100) if total_area > 0 else 0
@@ -176,3 +176,4 @@ def get_best_partnerships(ranked_pairs):
             used_companies.add(company2)
 
     return pd.DataFrame(best_partnerships, columns=ranked_pairs.columns)
+
