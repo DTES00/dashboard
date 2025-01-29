@@ -25,6 +25,10 @@ from bounding_box import rank_company_pairs_by_overlap_percentage
 from cluster import get_best_partnerships as get_best_partnerships_cluster
 from cluster import rank_partnerships_using_clusters, get_clusters_for_file
 
+# Combined heuristic
+from combined import combine_heuristics_normalized
+from combined import get_best_partnerships as get_best_partnerships_combined
+
 # --- VRP Solver Logic ---
 from solver1 import (
     create_batched_distance_matrix,
@@ -230,17 +234,15 @@ lon_input = st.sidebar.number_input("Longitude", value=5.0, step=0.01, format="%
 
 # Step 1: Algorithm Selection
 st.sidebar.header("Algorithm Selection")
-algorithm_options = ["Bounding Box", "Clustering"]
+algorithm_options = ["Bounding Box", "Clustering", "Combined"]
 selected_algorithm = st.sidebar.selectbox("Select Algorithm", algorithm_options)
 
 def create_distance_matrix(locations, batch_size, max_workers, base_url, profile, algorithm):
     if algorithm == "Bounding Box":
         return create_batched_distance_matrix(locations, batch_size, max_workers, base_url, profile)
     else:
-        dm =  create_batched_distance_matrix(locations, batch_size, max_workers, base_url, profile)
-        new_dm = dm.drop('Universal_Depot', axis = 0)
-        new_dm = new_dm.drop('Universal_Depot', axis = 1)
-        return new_dm
+        return create_batched_distance_matrix(locations, batch_size, max_workers, base_url, profile)
+        
 
 
 def solve_vrp_for_all_pairs(best_bb_df, distance_matrix, cost_per_truck, cost_per_km, time_per_vrp, flag, nmbr_loc, algorithm):
@@ -344,7 +346,11 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             st.session_state["ranked_pairs"] = ranked_pairs
             best_bb = get_best_partnerships_cluster(ranked_pairs)
             st.session_state["best_partnerships_bb"] = best_bb
-
+        elif selected_algorithm == "Combined":
+            ranked_pairs = combine_heuristics_normalized(rank_company_pairs_by_overlap_percentage(df), rank_partnerships_using_clusters(df, get_clusters_for_file(dm), dm), weight_overlap=0.5, weight_cluster=0.5)
+            st.session_state["ranked_pairs"] = ranked_pairs
+            best_bb = get_best_partnerships_combined(ranked_pairs)
+            st.session_state["best_partnerships_bb"] = best_bb
         st.success("Distance matrix + partnerships generated.")
     except Exception as e:
         st.error(f"Error generating matrix: {e}")
@@ -360,10 +366,11 @@ if "ranked_pairs" in st.session_state and st.session_state["ranked_pairs"] is no
 else:
     st.info("Upload data + generate the distance matrix first.")
 
-st.subheader("Potential Best Partnerships (Bounding-Box)")
+st.subheader("Potential Best Partnerships")
 best_partnerships_bb = st.session_state.get("best_partnerships_bb", None)
 if best_partnerships_bb is not None and not best_partnerships_bb.empty:
-    st.table(best_partnerships_bb.drop(columns=["Overlap Percentage"]).reset_index(drop=True))
+    if selected_algorithm == "Bounding Box":
+        st.table(best_partnerships_bb.drop(columns=["Overlap Percentage"]).reset_index(drop=True))
 else:
     st.warning("No best bounding-box partnerships found.")
 
