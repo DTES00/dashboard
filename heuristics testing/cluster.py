@@ -3,6 +3,8 @@ import folium
 import pandas as pd
 from matplotlib import colormaps
 import random
+import numpy as np
+
 
 def calculate_eps_k_distance_from_matrix(distance_matrix, k=3):
     # Sort distances for each point (row), excluding the diagonal (self-distance)

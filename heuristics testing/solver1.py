@@ -371,3 +371,44 @@ def get_individual_company_matrices(company1, company2, distance_matrix):
     company2_matrix = filter_for_company(company2)
 
     return company1_matrix, company2_matrix
+
+# solver1.py
+
+import pandas as pd
+import requests
+from networkx import DiGraph
+from vrpy import VehicleRoutingProblem
+from concurrent.futures import ThreadPoolExecutor
+
+import networkx as nx
+from itertools import combinations
+
+# ... (other existing imports and functions) ...
+
+
+def solve_vrp_for_all_pairs(best_pairs_df, distance_matrix, cost_per_truck, cost_per_km, time_per_vrp, flag, nmbr_loc, algorithm):
+    """
+    Wrapper function to solve VRP for all pairs in the provided DataFrame.
+    
+    Parameters:
+    - best_pairs_df (pd.DataFrame): DataFrame containing the best pairs with columns ['Company1', 'Company2']
+    - distance_matrix (pd.DataFrame): Complete distance matrix
+    - cost_per_truck (float): Cost per truck
+    - cost_per_km (float): Cost per kilometer
+    - time_per_vrp (int): Time limit per VRP in seconds
+    - flag (bool): Additional flag if needed
+    - nmbr_loc (int): Maximum number of locations per route
+    - algorithm (str): The heuristic used ('Bounding Box' or 'Clustering')
+    
+    Returns:
+    - pd.DataFrame: Results containing [Company1, Company2, Routes, Total Distance]
+    """
+    return solve_vrp_for_all_pairs_in_dataframe(
+        best_pairs_df,
+        distance_matrix,
+        cost_per_truck,
+        cost_per_km,
+        time_per_vrp,
+        flag,
+        nmbr_loc
+    )
