@@ -93,22 +93,32 @@ def create_batched_distance_matrix(locations, batch_size=10, max_workers=4,
 # Basic VRP solver function for a single distance matrix
 ################################################################################
 
-def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx,
-                           nmbr_loc, distance_matrix, depot_name="Universal_Depot"):
+def solve_cvrp_numeric_ids(
+    cost_per_truck,
+    cost_per_km,
+    timelimit,
+    approx,
+    nmbr_loc,
+    distance_matrix,
+    depot_name="Universal_Depot"
+):
     """
     Solve a Capacitated Vehicle Routing Problem using a distance matrix.
-    cspy=True and pricing_strategy="Exact" => VRPy runs an exact method with column-generation.
+    Returns the solution with the original location labels (rather than numeric IDs).
     """
     G = DiGraph()
     G.add_node("Source", demand=0)
     G.add_node("Sink", demand=0)
 
+    # All labels in this filtered matrix:
     labels = list(distance_matrix.index)
     customer_labels = [lab for lab in labels if lab != depot_name]
 
+    # Map each label to an integer, and store the reverse mapping
     label_to_id = {lab: idx for idx, lab in enumerate(customer_labels)}
+    id_to_label = {idx: lab for lab, idx in label_to_id.items()}
 
-    # Add each customer node with demand=1
+    # Add customer nodes with demand=1
     for lab, node_id in label_to_id.items():
         G.add_node(node_id, demand=1)
 
@@ -131,7 +141,7 @@ def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx,
     vrp.source = "Source"
     vrp.sink = "Sink"
     vrp.load_capacity = nmbr_loc
-    vrp.exact = approx  # This toggles internal VRPy logic, but we also set cspy below
+    vrp.exact = approx  # toggles internal VRPy logic
 
     try:
         vrp.solve(
@@ -144,16 +154,31 @@ def solve_cvrp_numeric_ids(cost_per_truck, cost_per_km, timelimit, approx,
         print("Error solving VRP:", e)
         return {"Routes": None, "Total Distance": float("inf")}
 
-    # vrp.best_value is the sum of edge costs in the solution (in meters).
-    # Convert cost from meters to km and add cost per truck (# of vehicles).
+    # vrp.best_value is the sum of edge costs in meters
     num_vehicles = len(vrp.best_routes)
     dist_in_km = vrp.best_value / 1000.0
     total_cost = dist_in_km * cost_per_km + num_vehicles * cost_per_truck
 
+    # ----------------------------------------------------------------------
+    # REMAP the numeric IDs in vrp.best_routes to the original location labels
+    # ----------------------------------------------------------------------
+    mapped_routes = {}
+    for route_id, node_list in vrp.best_routes.items():
+        new_nodes = []
+        for node in node_list:
+            if node == "Source" or node == "Sink":
+                # Optionally rename these to the depot name:
+                new_nodes.append(depot_name)
+            else:
+                # Remap the integer ID back to the original label
+                new_nodes.append(id_to_label[node])
+        mapped_routes[route_id] = new_nodes
+
     return {
-        "Routes": vrp.best_routes,
+        "Routes": mapped_routes,
         "Total Distance": total_cost
     }
+
 
 
 ################################################################################

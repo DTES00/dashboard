@@ -51,10 +51,17 @@ def rename_source_sink(route_stops):
     """Rename 'Source' or 'Sink' to 'Depot' in a list of stops."""
     return ["Depot" if stop in ("Source", "Sink") else stop for stop in route_stops]
 
+import ast
+import pandas as pd
+
 def prepare_single_pair_csv(pair_df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert a single-pair VRP result DataFrame into a row-per-vehicle format
     with columns: [Company1, Company2, Vehicle ID, Route, Total Cost].
+    
+    IMPORTANT: We **do not** rename 'Source' or 'Sink' here. We preserve
+    the exact route indices as they appear in the solver's output, which
+    should match the indices in the distance matrix.
     """
     rows = []
     for idx, row in pair_df.iterrows():
@@ -64,15 +71,15 @@ def prepare_single_pair_csv(pair_df: pd.DataFrame) -> pd.DataFrame:
         routes_dict = row.get("Routes", {})
 
         if isinstance(routes_dict, str):
-            # Convert stringified dict back to Python
+            # Convert stringified dict back to Python object
             routes_dict = ast.literal_eval(routes_dict)
 
         if routes_dict is None:
             continue
 
+        # Each key in routes_dict is a vehicle ID, value is a list of route stops
         for vehicle_id, stops_list in routes_dict.items():
-            cleaned_stops = rename_source_sink(stops_list)
-            route_str = " -> ".join(map(str, cleaned_stops))
+            route_str = " -> ".join(str(stop) for stop in stops_list)
             rows.append({
                 "Company1": c1,
                 "Company2": c2,
@@ -81,7 +88,10 @@ def prepare_single_pair_csv(pair_df: pd.DataFrame) -> pd.DataFrame:
                 "Total Cost": total_cost
             })
 
+
     return pd.DataFrame(rows)
+
+
 
 def prepare_pairs_vrp_csv(pair_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -117,36 +127,64 @@ def prepare_pairs_vrp_csv(pair_df: pd.DataFrame) -> pd.DataFrame:
 def generate_route_map_fixed_with_legend(
     depot_loc,
     data: pd.DataFrame,
-    test: pd.DataFrame,
+    solution_df: pd.DataFrame,
+    label_to_coords: dict,
     osrm_url="http://router.project-osrm.org",
-    profile="driving"
+    profile="driving",
+    zoom_start=7
 ):
     """
-    Generate a Folium map that displays routes for each row in 'test'.
-    Each row in 'test' must have a dict of Routes {vehicle_id: [stop indices]},
-    which are used to draw polylines.
+    Generates a Folium map that shows VRP routes with labeled stops.
+    Works with route outputs that use string labels (e.g. 'CompanyA_0')
+    rather than numeric indices.
+
+    Parameters
+    ----------
+    depot_loc : tuple of float
+        (latitude, longitude) for the depot location.
+    data : pd.DataFrame
+        A DataFrame (e.g. your uploaded data) with 'lat' and 'lon' columns
+        used to determine the map center.
+    solution_df : pd.DataFrame
+        DataFrame that must include columns "Company" and "Routes".
+        - "Company": string identifying the company name for display.
+        - "Routes": dict {vehicle_id: [label1, label2, ...]} for each row.
+    label_to_coords : dict
+        A dictionary {string_label: (latitude, longitude)} mapping each VRP
+        label to its coordinates. Must include an entry for each relevant label
+        except "Universal_Depot", which uses `depot_loc`.
+    osrm_url : str
+        Base URL for the OSRM service (local or public).
+    profile : str
+        OSRM profile ("driving", "cycling", etc.).
+    zoom_start : int
+        Initial zoom level for the Folium map.
+
+    Returns
+    -------
+    map_obj : folium.Map
+        The generated Folium map object.
+    map_file : str
+        The path to the saved HTML map file ("routes_map.html").
     """
+
+    # Center the map around the mean lat/lon of your data
     center_lat = data["lat"].mean()
     center_lon = data["lon"].mean()
-    map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+    map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=zoom_start)
 
-    # Add 'Company' column if missing
-    if "Company" not in test.columns:
-        test["Company"] = "NoCompanyName"
+    # If "Company" is missing in the solution, default to something
+    if "Company" not in solution_df.columns:
+        solution_df["Company"] = "NoCompanyName"
 
-    for _, row in test.iterrows():
+    # Iterate over each row in the solution DataFrame
+    for _, row in solution_df.iterrows():
         company_name = row["Company"]
         routes_dict = row.get("Routes", {})
+
         fg = folium.FeatureGroup(name=f"{company_name} Routes", show=True)
 
-        # Mark the depot
-        if depot_loc:
-            Marker(
-                location=depot_loc,
-                popup=f"{company_name} - Depot",
-                icon=folium.Icon(color="red", icon="home", prefix="fa")
-            ).add_to(fg)
-
+        # Cycle through colors for each vehicle
         route_colors = itertools.cycle([
             "blue", "green", "purple", "orange", "darkred",
             "lightred", "beige", "darkblue", "darkgreen",
@@ -156,26 +194,30 @@ def generate_route_map_fixed_with_legend(
 
         for vehicle_id, stops_list in routes_dict.items():
             route_color = next(route_colors)
-            numeric_stops = [s for s in stops_list if isinstance(s, int)]
+
+            # Build the lat/lon for each stop in the route
             route_coords = []
+            for stop_label in stops_list:
+                if stop_label == "Universal_Depot":
+                    # Use the depot coordinates
+                    route_coords.append(depot_loc)
+                else:
+                    # Look up the location from label_to_coords
+                    if stop_label in label_to_coords:
+                        route_coords.append(label_to_coords[stop_label])
+                    else:
+                        print(f"[WARNING] Label '{stop_label}' not found in label_to_coords! "
+                              "Using depot location as fallback.")
+                        route_coords.append(depot_loc)
 
-            # Gather lat/lon
-            for stop_idx in numeric_stops:
-                if 0 <= stop_idx < len(data):
-                    row_data = data.iloc[stop_idx]
-                    route_coords.append((row_data["lat"], row_data["lon"]))
-
-            # If we want to start/end at the depot:
-            if depot_loc and route_coords:
-                route_coords = [depot_loc] + route_coords + [depot_loc]
-
-            # Build OSRM polylines for realistic route segments
+            # Build OSRM polylines for more accurate route geometry
             real_path = []
             for i in range(len(route_coords) - 1):
                 start_lat, start_lon = route_coords[i]
                 end_lat, end_lon = route_coords[i + 1]
                 coords_str = f"{start_lon},{start_lat};{end_lon},{end_lat}"
                 url = f"{osrm_url}/route/v1/{profile}/{coords_str}?geometries=geojson&steps=true"
+
                 try:
                     resp = requests.get(url)
                     resp.raise_for_status()
@@ -185,15 +227,17 @@ def generate_route_map_fixed_with_legend(
                         # geometry is a list of [lon, lat]
                         for (lon_, lat_) in geometry:
                             real_path.append((lat_, lon_))
-                except Exception as e:
-                    print(f"OSRM error {start_lat},{start_lon} -> {end_lat},{end_lon}: {e}")
-                    continue
+                except requests.exceptions.RequestException as e:
+                    print(f"[ERROR] OSRM request failed: {e}")
+                    # If OSRM fails, you could fallback to direct lines
+                    real_path.append((start_lat, start_lon))
+                    real_path.append((end_lat, end_lon))
 
-            # Add the polyline for this route
+            # Draw the route polyline on the map
             if real_path:
-                PolyLine(locations=real_path, color=route_color, weight=3, opacity=0.5).add_to(fg)
+                PolyLine(locations=real_path, color=route_color, weight=4, opacity=0.8).add_to(fg)
 
-            # Add numbered markers for each stop in route_coords
+            # Add numbered markers for each stop
             for stop_order, (lat_, lon_) in enumerate(route_coords):
                 label_number = stop_order + 1
                 folium.map.Marker(
@@ -218,9 +262,12 @@ def generate_route_map_fixed_with_legend(
         fg.add_to(map_obj)
 
     LayerControl(collapsed=False).add_to(map_obj)
+
+    # Save as HTML and return
     map_file = "routes_map.html"
     map_obj.save(map_file)
     print(f"Map saved to {map_file}")
+
     return map_obj, map_file
 
 #app begins here
@@ -279,6 +326,7 @@ if uploaded_file is not None:
             st.session_state["uploaded_file"] = uploaded_file
             st.session_state["uploaded_data"] = df
             st.session_state["distance_matrix_generated"] = False
+            
         except Exception as e:
             st.error(f"Error reading file: {e}")
             st.stop()
@@ -313,14 +361,14 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             "unique_name": "Universal_Depot"
         })
 
-        # # UNOMMENT FOR Local OSRM if available:
-        # if profile == "driving":
-        #     base_url = "http://localhost:5000"
-        # elif profile == "cycling":
-        #     base_url = "http://localhost:5001"
+        # UNOMMENT FOR Local OSRM if available:
+        if profile == "driving":
+            base_url = "http://localhost:5000"
+        elif profile == "cycling":
+            base_url = "http://localhost:5001"
         
-        #COMMENT BELOW AND UNCOMMENT ABOVE FOR LOCAL OSRM:
-        base_url = "http://router.project-osrm.org"
+        # #COMMENT BELOW AND UNCOMMENT ABOVE FOR LOCAL OSRM:
+        # base_url = "http://router.project-osrm.org"
 
         dm = create_distance_matrix(
             locations,
@@ -473,12 +521,19 @@ if st.button("Create Map for Selected Pair"):
         st.warning("No pair VRP result found. Solve VRP for a pair first.")
     else:
         try:
+            label_to_coords = {}
+            for i, row in df.iterrows():
+                # Suppose you originally built the solver's label as f"{row['name']}_{i}"
+                label = f"{row['name']}_{i}"
+                label_to_coords[label] = (row["lat"], row["lon"])
+
             depot_loc = st.session_state["depot_location"]
             data_original = st.session_state["uploaded_data"]
             route_map, map_file = generate_route_map_fixed_with_legend(
                 depot_loc,
                 data_original,
                 pair_df,
+                label_to_coords,
                 osrm_url="http://router.project-osrm.org",
                 profile=profile
             )
