@@ -1,0 +1,16 @@
+pandas
+geopandas
+shapely
+networkx
+requests
+numpy
+scikit-learn
+folium
+matplotlib
+joblib
+numba
+streamlit
+ipython
+vrpy
+streamlit_folium
+watchdog # to have better performance with streamlit
