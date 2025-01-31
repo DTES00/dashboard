@@ -1,4 +1,4 @@
-Make sure Docker Desktop is running, then proceed to search images for the following:
+Download Docker and make sure Docker is running, then proceed to search images for the following:
 ghcr.io/project-osrm/osrm-backend
 OSRM should pop up; proceed to press the button to pull the image and wait for it to finish. If everything went correctly, it should now be visible in the images tab.
 
