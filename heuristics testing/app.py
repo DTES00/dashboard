@@ -361,14 +361,14 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
             "unique_name": "Universal_Depot"
         })
 
-        # UNOMMENT FOR Local OSRM if available:
-        if profile == "driving":
-            base_url = "http://localhost:5000"
-        elif profile == "cycling":
-            base_url = "http://localhost:5001"
+        # # UNOMMENT FOR Local OSRM if available:
+        # if profile == "driving":
+        #     base_url = "http://localhost:5000"
+        # elif profile == "cycling":
+        #     base_url = "http://localhost:5001"
         
-        # #COMMENT BELOW AND UNCOMMENT ABOVE FOR LOCAL OSRM:
-        # base_url = "http://router.project-osrm.org"
+        #COMMENT BELOW AND UNCOMMENT ABOVE FOR LOCAL OSRM:
+        base_url = "http://router.project-osrm.org"
 
         dm = create_distance_matrix(
             locations,
