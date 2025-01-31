@@ -1,5 +1,3 @@
-# solver.py
-
 import pandas as pd
 import requests
 from networkx import DiGraph
@@ -9,16 +7,15 @@ from concurrent.futures import ThreadPoolExecutor
 import networkx as nx
 from itertools import combinations
 
-################################################################################
-# Create the distance matrix with OSRM in batches
-################################################################################
 
+
+# Create the distance matrix with OSRM in batches
 def get_osrm_distance_submatrix(src_batch, dst_batch,
                                 base_url="http://router.project-osrm.org",
                                 profile="driving"):
     """
     Send a table request to OSRM to get distances between src_batch and dst_batch.
-    Returns a 2D list of distances or None if there's an error.
+    Returns a 2D list of distances or None if there's an error
     """
     combined = src_batch + dst_batch
     coords_str = ";".join(f"{loc['lon']},{loc['lat']}" for loc in combined)
@@ -48,8 +45,7 @@ def create_batched_distance_matrix(locations, batch_size=10, max_workers=4,
                                    profile="driving"):
     """
     Create a complete non-symmetric distance matrix by batching location pairs
-    and parallelizing OSRM table requests. 'profile' can be "driving", "cycling",
-    etc., depending on your OSRM setup.
+    and parallelizing OSRM table requests
     """
     num_locations = len(locations)
     all_unique_names = [loc['unique_name'] for loc in locations]
@@ -89,10 +85,7 @@ def create_batched_distance_matrix(locations, batch_size=10, max_workers=4,
     return full_matrix
 
 
-################################################################################
 # Basic VRP solver function for a single distance matrix
-################################################################################
-
 from vrpy import VehicleRoutingProblem
 from networkx import DiGraph
 
@@ -107,11 +100,7 @@ def solve_cvrp_numeric_ids(
 ):
     """
     Solve a Capacitated Vehicle Routing Problem using a distance matrix.
-    Returns the solution with the original location labels (rather than numeric IDs).
-
-    This version incorporates cost_per_truck directly into the solver's objective
-    by adding an equivalent distance penalty on Source->customer edges, then
-    subtracting that penalty before computing the final total cost.
+    Returns the solution with the original location labels.
     """
     # Create directed graph
     G = DiGraph()
@@ -137,13 +126,10 @@ def solve_cvrp_numeric_ids(
                 cost = distance_matrix.loc[i_lab, j_lab]  # in meters
                 G.add_edge(i_id, j_id, cost=cost)
 
-    # If cost_per_km is nonzero, convert cost_per_truck to "meters"
-    # so it fits the same cost scale as distances.
+    # If cost_per_km is nonzero, convert cost_per_truck 
     if cost_per_km != 0:
         truck_cost_in_meters = cost_per_truck * 1000.0 / cost_per_km
     else:
-        # If cost_per_km is zero, we cannot do a direct conversion;
-        # handle it in a way that fits your application logic:
         truck_cost_in_meters = 0
 
     # Add edges from Source -> customer (with truck penalty) and customer -> Sink
@@ -158,7 +144,7 @@ def solve_cvrp_numeric_ids(
     vrp.source = "Source"
     vrp.sink = "Sink"
     vrp.load_capacity = nmbr_loc  # each customer has demand=1
-    vrp.exact = approx            # toggles approximation or exact cspy
+    vrp.exact = approx            # toggles approximation or exact cspy, not implemented any more
 
     # Solve with a time limit and chosen solver
     try:
@@ -185,9 +171,7 @@ def solve_cvrp_numeric_ids(
     # Now compute final total cost in the exact same way:
     total_cost = dist_in_km * cost_per_km + num_vehicles * cost_per_truck
 
-    # ----------------------------------------------------------------------
     # Remap numeric IDs in vrp.best_routes to the original location labels
-    # ----------------------------------------------------------------------
     mapped_routes = {}
     for route_id, node_list in vrp.best_routes.items():
         new_nodes = []
@@ -204,13 +188,7 @@ def solve_cvrp_numeric_ids(
         "Total Distance": total_cost
     }
 
-
-
-
-################################################################################
 # Compute SOLO route solutions
-################################################################################
-
 def all_filtered_matrices(distance_matrix):
     """
     Generate filtered matrices for each single company + depot.
@@ -263,10 +241,7 @@ def solo_routes(cost_per_truck, cost_per_km, timelimit, approx, nmbr_loc, distan
     return df
 
 
-################################################################################
 # Solve VRP for a given set of pairs (Bounding Box or Cluster approach)
-################################################################################
-
 def solve_vrp_for_all_pairs_in_dataframe(pairs_df, distance_matrix,
                                          cost_per_truck, cost_per_km,
                                          timelimit, approx, nmbr_loc):
@@ -309,10 +284,7 @@ def solve_vrp_for_all_pairs_in_dataframe(pairs_df, distance_matrix,
     return pd.DataFrame(results)
 
 
-################################################################################
 # Solve VRP for ALL possible pairs (perfect matching approach)
-################################################################################
-
 def solve_vrp_for_all_possible_pairs(distance_matrix,
                                      cost_per_truck,
                                      cost_per_km,
@@ -422,20 +394,6 @@ def get_individual_company_matrices(company1, company2, distance_matrix):
     company2_matrix = filter_for_company(company2)
 
     return company1_matrix, company2_matrix
-
-# solver1.py
-
-import pandas as pd
-import requests
-from networkx import DiGraph
-from vrpy import VehicleRoutingProblem
-from concurrent.futures import ThreadPoolExecutor
-
-import networkx as nx
-from itertools import combinations
-
-# ... (other existing imports and functions) ...
-
 
 def solve_vrp_for_all_pairs(best_pairs_df, distance_matrix, cost_per_truck, cost_per_km, time_per_vrp, flag, nmbr_loc, algorithm):
     """
