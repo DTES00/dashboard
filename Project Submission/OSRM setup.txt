@@ -35,3 +35,5 @@ docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-customize /data/neth
 Command to launch the bicycle server:
 docker run -t -v "<your-path>:/data" -p 5001:5000 osrm/osrm-backend osrm-routed --algorithm mld /data/netherlands-bicycle.osrm
 the local host will be on port 5001, as expected for the dashboard
+
+Lastly, if the OSRM servers are setup locally, go into "app.py" and uncomment line 374-378 and comment line 381 additionally line 385 batch_size = 100. The dashboard will now send requests to the local server. If you want to use online requests reverse the comments again and make sure batch_size = 10.
