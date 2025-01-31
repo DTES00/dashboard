@@ -309,6 +309,27 @@ st.sidebar.header("Routing Mode")
 use_bicycle = st.sidebar.checkbox("Use Bicycle Routing", value=False)
 profile = "cycling" if use_bicycle else "driving"
 
+if 'use_bicycle' not in st.session_state:
+    st.session_state['use_bicycle'] = use_bicycle
+else:
+    # If the checkbox state has changed, reset relevant session_state variables
+    if st.session_state['use_bicycle'] != use_bicycle:
+        st.session_state["distance_matrix_generated"] = False
+        st.session_state["distance_matrix"] = None
+        st.session_state["ranked_pairs"] = None
+        st.session_state["best_partnerships"] = None
+        st.session_state["pair_result_selected"] = None
+        st.session_state["selected_pair_comparison"] = None
+        st.session_state["pair_result_bb"] = None
+        st.session_state["bb_comparison_table"] = None
+        st.session_state["all_pairs_result"] = None
+        st.session_state["all_pairs_total_cost"] = None
+        st.session_state["pair_map_file"] = None
+        st.session_state["pair_map_generated"] = False
+        # Update the stored value of 'use_bicycle'
+        st.session_state['use_bicycle'] = use_bicycle
+
+
 # File upload
 uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 if uploaded_file is not None:
