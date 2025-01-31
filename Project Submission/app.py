@@ -382,7 +382,7 @@ if df is not None and not st.session_state.get("distance_matrix_generated", Fals
 
         dm = create_distance_matrix(
             locations,
-            batch_size=100,
+            batch_size=10,
             max_workers=4,
             base_url=base_url,
             profile=profile
