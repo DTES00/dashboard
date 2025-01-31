@@ -1,0 +1,37 @@
+Make sure Docker Desktop is running, then proceed to search images for the following:
+ghcr.io/project-osrm/osrm-backend
+OSRM should pop up; proceed to press the button to pull the image and wait for it to finish. If everything went correctly, it should now be visible in the images tab.
+
+Download the map for the Netherlands from Geofabrik:
+https://download.geofabrik.de/europe/netherlands-latest.osm.pbf
+
+Go to Docker Desktop again and click on "Terminal," which should be in the bottom right, and run the following command, replacing <your-path> with the folder where your map is saved:
+
+docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/netherlands-latest.osm.pbf
+
+The command can is extracting the car routes and can take a while.
+
+Proceed to open PowerShell and run the following to ensure there is no conflict when setting up a bicycle routing server later:
+Get-ChildItem <your-path>\netherlands-latest.osrm* | Rename-Item -NewName { $_.Name -replace "netherlands-latest", "netherlands-car" }
+
+After renaming, return to the Docker terminal and run the following commands:
+docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-partition /data/netherlands-car.osrm
+docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-customize /data/netherlands-car.osrm
+
+After these commands have successfully run, the local server can be launched using:
+docker run -t -v "<your-path>:/data" -p 5000:5000 osrm/osrm-backend osrm-routed --algorithm mld /data/netherlands-car.osrm
+the local host will be on port 5000, as is expected in the code for the dashboard.
+
+The Bicycle server setup is almost the same. Open an additional Terminal in Docker and run:
+docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-extract -p /opt/bicycle.lua /data/netherlands-latest.osm.pbf
+
+PowerShell command for renaming:
+Get-ChildItem <your-path>\netherlands-latest.osrm* | Rename-Item -NewName { $_.Name -replace "netherlands-latest", "netherlands-bicycle" }
+
+Go back to the Terminal in Docker where the bicycle routing server will be set up, enter the following:
+docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-partition /data/netherlands-bicycle.osrm
+docker run -t -v "<your-path>:/data" osrm/osrm-backend osrm-customize /data/netherlands-bicycle.osrm
+
+Command to launch the bicycle server:
+docker run -t -v "<your-path>:/data" -p 5001:5000 osrm/osrm-backend osrm-routed --algorithm mld /data/netherlands-bicycle.osrm
+the local host will be on port 5001, as expected for the dashboard
